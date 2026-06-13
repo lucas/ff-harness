@@ -5,9 +5,9 @@ This file is the live state of the v1 build. It is self-sufficient: after `/clea
 ## Status snapshot
 
 - **Last updated:** 2026-06-13
-- **Current step:** Step 11 — Demo polish + Docker + HARNESS.md (next up)
-- **Next step:** Step 12 — Polish (optional)
-- **Last green test:** `uv run pytest tests/ -m "not live"` (215 passed, 1 deselected — Steps 0-10 combined); `uv run pyright harness/ tests/` (0 errors).
+- **Current step:** v1 COMPLETE — Steps 0-11 done. Step 12 polish remains optional.
+- **Next step:** Step 12 polish (optional), OR ship/demo.
+- **Last green test:** `uv run pytest tests/ -m "not live"` (215 passed, 1 deselected — Steps 0-11 combined); `uv run pyright harness/ tests/` (0 errors); `docker build` succeeds (377MB image).
 - **Active blockers:** none
 
 ## The 12-step checklist
@@ -47,7 +47,7 @@ Each row is one step from the Build Order in `/Users/elroy/.claude/plans/ignore-
 - [x] **Step 10 — Jinja2 templates.** Status: done (2026-06-13).
   - Gate: `uv run pytest tests/api/test_web_ui.py`
   - Done when: each template renders without exception; rendered HTML contains the expected anchors; 2-second polling visibly updates the event timeline in the browser walk-through.
-- [ ] **Step 11 — Demo polish + Docker + HARNESS.md.** Status: pending.
+- [x] **Step 11 — Demo polish + Docker + HARNESS.md.** Status: done (2026-06-13).
   - Gate: `uv run pytest tests/test_demo_flow.py` then `docker compose up` for a live demo under $1.
   - Done when: full restaurant flow runs end-to-end on MockWorker; live demo completes under $1; both `MODEL_CHAT` and `MODEL_CODE` appear in `spend_log`; `docker compose down && up` preserves the session list; `HARNESS.md` shipped at repo root.
 - [ ] **Step 12 — Polish (stretch).** Status: pending.

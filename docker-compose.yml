@@ -1,0 +1,14 @@
+services:
+  harness:
+    build: .
+    image: harness-v1
+    container_name: harness-v1
+    ports:
+      - "8000:8000"
+    volumes:
+      # Bind-mount ./data so SQLite DBs and generated sites survive
+      # `docker compose down` and are visible to the host for inspection.
+      - ./data:/app/data
+    env_file:
+      - .env
+    restart: unless-stopped

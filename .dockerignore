@@ -1,0 +1,40 @@
+# Local venv — image installs its own via uv sync.
+.venv
+venv
+
+# Python cache + bytecode.
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+
+# Git metadata is not needed at runtime (post-hook git uses sandbox-local repos).
+.git
+.gitignore
+
+# Local state — runtime creates these inside the container; bind-mount provides
+# the persistent copy. Including them would bake stale DBs into the image.
+data
+
+# Reference docs and design assets; not needed in the runtime image.
+docs
+*.pdf
+*.md
+!HARNESS.md
+
+# Claude harness metadata + IDE config.
+.claude
+.idea
+.vscode
+
+# Test artifacts.
+.pytest_cache
+tests
+
+# OS noise.
+.DS_Store
+
+# Local env files — operators provide their own at runtime via --env-file.
+.env
+.env.*
+!.env.example
