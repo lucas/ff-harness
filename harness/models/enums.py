@@ -16,6 +16,7 @@ class EventType(str, Enum):
     ALARM_RAISED = "alarm_raised"
     AWAITING_HUMAN = "awaiting_human"
     HUMAN_RESUMED = "human_resumed"
+    REWOUND = "rewound"
 
 
 class MaterialType(str, Enum):

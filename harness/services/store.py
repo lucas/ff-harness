@@ -279,6 +279,155 @@ def _decode_event(row: sqlite3.Row) -> dict:
     return d
 
 
+def rewind_to_awaiting_human(
+    session_conn: sqlite3.Connection,
+    target_event_id: str,
+) -> dict:
+    """Truncate per-session DB rows whose id > target_event_id.
+
+    Validates that the target event exists and is an ``awaiting_human`` event;
+    otherwise raises :class:`ValueError`. Re-pends the associated pending
+    material (the one the session was paused on), then appends a single
+    ``rewound`` audit event so the truncation is visible in the event log.
+
+    All deletes + the re-pend + the audit insert happen inside one transaction
+    so a partial state is impossible. The orchestrator (NOT this function)
+    is responsible for updating the core ``sessions`` row (status, stage,
+    iter_since_approval) to match the rewound state.
+
+    Returns a report dict::
+
+        {
+            "target_event_id": str,
+            "target_event_payload": dict,
+            "removed_events": int,
+            "removed_materials": int,
+            "removed_checkpoints": int,
+            "removed_alarms": int,
+            "repended_material_id": str | None,
+            "rewind_event_id": str,
+        }
+    """
+    target_row = session_conn.execute(
+        "SELECT id, ts, type, stage, payload, material_id, checkpoint_id, alarm_id"
+        " FROM events WHERE id = ?",
+        (target_event_id,),
+    ).fetchone()
+    if target_row is None:
+        raise ValueError(
+            "target event not found or not an awaiting_human event"
+        )
+    if target_row["type"] != "awaiting_human":
+        raise ValueError(
+            "target event not found or not an awaiting_human event"
+        )
+    target_payload = json.loads(target_row["payload"])
+    target_stage = target_row["stage"]
+    pending_material_id = (
+        target_payload.get("material_id")
+        if isinstance(target_payload, dict)
+        else None
+    )
+
+    # Single-transaction truncation. The `with` block on a sqlite3.Connection
+    # commits on success and rolls back on exception, so an error inside the
+    # body (e.g. FK violation, monkeypatched failure) leaves the DB unchanged.
+    with session_conn:
+        # Count then delete. Order is FK-safe: events references material /
+        # checkpoints / alarms, so events must die first (deleting those
+        # parents would otherwise trip FK enforcement).
+        removed_events = int(
+            session_conn.execute(
+                "SELECT COUNT(*) FROM events WHERE id > ?",
+                (target_event_id,),
+            ).fetchone()[0]
+        )
+        removed_alarms = int(
+            session_conn.execute(
+                "SELECT COUNT(*) FROM alarms WHERE id > ?",
+                (target_event_id,),
+            ).fetchone()[0]
+        )
+        removed_checkpoints = int(
+            session_conn.execute(
+                "SELECT COUNT(*) FROM checkpoints WHERE id > ?",
+                (target_event_id,),
+            ).fetchone()[0]
+        )
+        removed_materials = int(
+            session_conn.execute(
+                "SELECT COUNT(*) FROM material WHERE id > ?",
+                (target_event_id,),
+            ).fetchone()[0]
+        )
+        session_conn.execute(
+            "DELETE FROM events WHERE id > ?", (target_event_id,)
+        )
+        session_conn.execute(
+            "DELETE FROM alarms WHERE id > ?", (target_event_id,)
+        )
+        session_conn.execute(
+            "DELETE FROM checkpoints WHERE id > ?", (target_event_id,)
+        )
+        session_conn.execute(
+            "DELETE FROM material WHERE id > ?", (target_event_id,)
+        )
+
+        # Re-pend the material the session was paused on. The deletes above
+        # cannot have removed it (its id is <= target_event_id since the
+        # awaiting_human event references a material that existed at pause
+        # time), but guard in case the row was already gone for any reason.
+        repended_material_id: str | None = None
+        if isinstance(pending_material_id, str):
+            row = session_conn.execute(
+                "SELECT id FROM material WHERE id = ?",
+                (pending_material_id,),
+            ).fetchone()
+            if row is not None:
+                session_conn.execute(
+                    "UPDATE material SET pending = 1 WHERE id = ?",
+                    (pending_material_id,),
+                )
+                repended_material_id = pending_material_id
+
+        # Append the audit event AFTER the deletes so the new event sorts
+        # after the rewind target (UUID7 is time-ordered, the new id is fresh).
+        rewind_event_id = new_id()
+        session_conn.execute(
+            "INSERT INTO events (id, ts, type, stage, payload, material_id, checkpoint_id, alarm_id)"
+            " VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL)",
+            (
+                rewind_event_id,
+                _now_iso(),
+                "rewound",
+                target_stage,
+                json.dumps(
+                    {
+                        "target_event_id": target_event_id,
+                        "removed_events": removed_events,
+                        "removed_materials": removed_materials,
+                        "removed_checkpoints": removed_checkpoints,
+                        "removed_alarms": removed_alarms,
+                        "repended_material_id": repended_material_id,
+                    }
+                ),
+            ),
+        )
+
+    return {
+        "target_event_id": target_event_id,
+        "target_event_payload": target_payload
+        if isinstance(target_payload, dict)
+        else {},
+        "removed_events": removed_events,
+        "removed_materials": removed_materials,
+        "removed_checkpoints": removed_checkpoints,
+        "removed_alarms": removed_alarms,
+        "repended_material_id": repended_material_id,
+        "rewind_event_id": rewind_event_id,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Material (per-session DB)
 # ---------------------------------------------------------------------------

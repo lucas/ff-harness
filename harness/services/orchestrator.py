@@ -203,6 +203,57 @@ def force_continue(
     }
 
 
+def rewind_session(
+    session_id: str,
+    target_event_id: str,
+    *,
+    core_conn: sqlite3.Connection,
+    session_conn: sqlite3.Connection,
+) -> dict:
+    """Rewind ``session_id`` to the given ``awaiting_human`` event.
+
+    Composable: delegates the per-session truncation to
+    :func:`store.rewind_to_awaiting_human`, then updates the core ``sessions``
+    row to reflect the rewound state (``status='awaiting_human'``,
+    ``current_stage`` taken from the target event's stage, and
+    ``iter_since_approval`` reset to 0 because a human is about to answer
+    again).
+
+    Raises :class:`ValueError` if the session does not exist or the target
+    event isn't a valid ``awaiting_human`` event id. The store call is
+    transactional, so on validation failure no rows have been touched.
+
+    Returns the store helper's report dict augmented with ``{'session_id'}``.
+    The ``current_stage`` is taken from the target event's ``stage`` column
+    (the authoritative source — the event was written by the orchestrator at
+    the moment the pause was entered, so its stage is the rewound state).
+    """
+    session = store.load_session(core_conn, session_id)
+    if session is None:
+        raise ValueError(f"session {session_id!r} not found in core DB")
+
+    report = store.rewind_to_awaiting_human(session_conn, target_event_id)
+
+    # Stage is recorded on the event row itself — the orchestrator wrote it
+    # at pause time, so it's the right value to revert to.
+    target_stage = session_conn.execute(
+        "SELECT stage FROM events WHERE id = ?", (target_event_id,)
+    ).fetchone()
+    new_stage = target_stage["stage"] if target_stage is not None else session["current_stage"]
+
+    store.update_session_status(
+        core_conn,
+        session_id,
+        SessionStatus.AWAITING_HUMAN.value,
+        current_stage=new_stage,
+        iter_since_approval=0,
+    )
+
+    out = dict(report)
+    out["session_id"] = session_id
+    return out
+
+
 def _run_loop(
     session_id: str,
     config: OrchestratorConfig,
@@ -998,6 +1049,7 @@ __all__ = [
     "RunResult",
     "run_until_pause",
     "force_continue",
+    "rewind_session",
     "PAUSE_SPEND_CAP",
     "PAUSE_TURN_CAP",
     "PAUSE_AWAITING_HUMAN",

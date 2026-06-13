@@ -671,3 +671,117 @@ def test_400_on_answer_to_approval_without_approved(make_client):
     )
     assert r.status_code == 400
     assert r.json()["error"] == "bad_request"
+
+
+# ---------------------------------------------------------------------------
+# /rewind — truncate the session to a previous awaiting_human event
+# ---------------------------------------------------------------------------
+
+
+def test_rewind_route_truncates_session(make_client):
+    """Drive past two ask_user pauses; rewind to the first; assert truncation.
+
+    The session ends up back at the first pause: events count drops to ~3
+    (worker_input, worker_output, awaiting_human), the first pending
+    material is re-pended, and a `rewound` audit event appears at the tail.
+    """
+    scripted: list[ToolCall | Final | Escalate] = [
+        ToolCall(tool="ask_user", args={"question": "first?"}),
+        ToolCall(tool="ask_user", args={"question": "second?"}),
+        Final(summary="done"),
+    ]
+    client = make_client(scripted)
+    sid = client.post("/sessions", json={}).json()["session_id"]
+
+    # Drive to the first awaiting_human pause.
+    client.post(f"/sessions/{sid}/resume", json={})
+    detail = client.get(f"/sessions/{sid}").json()
+    first_awaiting = next(
+        e for e in detail["events"] if e["type"] == "awaiting_human"
+    )
+    pending_id = detail["pending_materials"][0]["id"]
+
+    # Answer the first ask_user and drive to the second pause.
+    client.post(
+        f"/sessions/{sid}/answer",
+        json={"material_id": pending_id, "answer_text": "Alice"},
+    )
+    detail_mid = client.get(f"/sessions/{sid}").json()
+    assert detail_mid["session"]["status"] == "awaiting_human"
+    assert len(detail_mid["pending_materials"]) >= 1
+
+    # POST /rewind with the first awaiting_human's id.
+    r = client.post(
+        f"/sessions/{sid}/rewind",
+        json={"target_event_id": first_awaiting["id"]},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["session_id"] == sid
+    assert body["target_event_id"] == first_awaiting["id"]
+    assert body["repended_material_id"] == pending_id
+    assert isinstance(body["rewind_event_id"], str)
+    assert body["removed_events"] > 0
+
+    # Re-fetch detail: ~3 events (worker_input, worker_output, awaiting_human)
+    # plus the trailing `rewound` audit event = ~4. Pending material is back.
+    final = client.get(f"/sessions/{sid}").json()
+    types_now = [e["type"] for e in final["events"]]
+    assert types_now[-1] == "rewound"
+    # The first ask_user material is pending again.
+    assert any(m["id"] == pending_id for m in final["pending_materials"])
+    # Status is awaiting_human.
+    assert final["session"]["status"] == "awaiting_human"
+
+
+def test_rewind_route_400_on_bad_target(make_client):
+    """POST /rewind with a non-awaiting_human event id -> 400."""
+    scripted: list[ToolCall | Final | Escalate] = [
+        ToolCall(tool="ask_user", args={"question": "q?"}),
+        Final(summary="done"),
+    ]
+    client = make_client(scripted)
+    sid = client.post("/sessions", json={}).json()["session_id"]
+    client.post(f"/sessions/{sid}/resume", json={})
+
+    detail = client.get(f"/sessions/{sid}").json()
+    worker_output = next(
+        e for e in detail["events"] if e["type"] == "worker_output"
+    )
+
+    r = client.post(
+        f"/sessions/{sid}/rewind",
+        json={"target_event_id": worker_output["id"]},
+    )
+    assert r.status_code == 400
+    body = r.json()
+    assert body["error"] == "bad_request"
+    assert "target_event_id" in body["detail"]
+
+
+def test_rewind_route_404_on_missing_session(make_client):
+    client = make_client([])
+    fake = "00000000-0000-7000-8000-000000000000"
+    r = client.post(
+        f"/sessions/{fake}/rewind",
+        json={"target_event_id": "anything"},
+    )
+    assert r.status_code == 404
+    assert r.json()["error"] == "not_found"
+
+
+def test_rewind_route_400_on_missing_body(make_client):
+    """POST /rewind with no body or no target_event_id -> 400."""
+    client = make_client([])
+    sid = client.post("/sessions", json={}).json()["session_id"]
+
+    # Missing target_event_id field.
+    r = client.post(f"/sessions/{sid}/rewind", json={})
+    assert r.status_code == 400
+    assert r.json()["error"] == "bad_request"
+
+    # Empty string target_event_id (min_length=1).
+    r2 = client.post(
+        f"/sessions/{sid}/rewind", json={"target_event_id": ""}
+    )
+    assert r2.status_code == 400

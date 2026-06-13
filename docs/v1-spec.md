@@ -247,6 +247,7 @@ WorkerResponse = Annotated[ToolCall | Final | Escalate, Field(discriminator='typ
 | `alarm_raised` | guardrails / checkpoints / dispatcher | `{alarm_id, type, severity}` |
 | `awaiting_human` | orchestrator on ask_user/request_approval/escalate | `{material_id, reason}` |
 | `human_resumed` | `/answer` HTTP handler | `{material_id, answer_or_decision}` |
+| `rewound` | `/rewind` HTTP handler (via `store.rewind_to_awaiting_human`) | `{target_event_id, removed_events, removed_materials, removed_checkpoints, removed_alarms, repended_material_id}` |
 
 ## 7. Material types (closed set)
 
@@ -363,6 +364,8 @@ State lives entirely in SQLite. `ask_user` and `request_approval` are surfaced a
 On resume after the user submits via `POST /sessions/{id}/answer`, the answer is written as `user_answer` / `user_approval` material and fed back to the worker **as the tool result in message history** — the worker just sees `ask_user(...) -> "answer"` in the next turn's `messages`. The orchestrator does not branch on whether the worker is real or mock.
 
 `POST /sessions/{id}/resume` carries explicit unstick semantics: if the session is `awaiting_human`, the route calls `orchestrator.force_continue(session_id, ...)` BEFORE invoking `run_until_pause`. `force_continue` auto-approves any pending `continuation_approval` materials (persisting a `user_approval` row with `auto_approved_via_resume: True`, appending a `human_resumed` event, marking the pending resolved), resets `iter_since_approval` to 0, and flips status back to `active` so the loop can run. Real content gates (`approval` on `business_brief`/`mockup`, freeform `ask_user`) are left pending — those still require an explicit `/answer`. The user's mental model: "/resume means continue past whatever safety cap is blocking me; real questions still need answers."
+
+`POST /sessions/{id}/rewind` is the destructive counterpart: the user picks any prior `awaiting_human` event and the session resets to that paused state. The orchestrator delegates to `store.rewind_to_awaiting_human(session_conn, target_event_id)`, which (in a single transaction) deletes every event / material / checkpoint / alarm whose UUID7 id is greater than the target (UUID7 is time-ordered so `id > target_event_id` means "happened after"), re-pends the material the session was originally paused on, and appends a `rewound` audit event so the truncation is visible in the event log and rendered as a chat divider. The orchestrator then resets the core session row: `status = 'awaiting_human'`, `current_stage` taken from the rewind target event's `stage`, `iter_since_approval = 0` (a human is about to answer again). The `spend_log` (core DB) is untouched — it represents real cost. The route does NOT invoke `run_until_pause` afterward; the user responds via `/answer` and that triggers the loop. Order of deletes is FK-safe (events first since they reference material/checkpoints/alarms, then alarms, then checkpoints, then materials).
 
 ### Web UI (HITL surface)
 

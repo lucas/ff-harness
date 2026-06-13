@@ -111,6 +111,34 @@
       });
     });
 
+    // Rewind buttons in the events table — POST to /sessions/{id}/rewind.
+    // Confirmation dialog protects against accidental clicks; on success
+    // the page reloads so the truncated state is visible.
+    document.querySelectorAll('button.rewind-btn').forEach(function(btn) {
+      btn.addEventListener('click', async function() {
+        const eventId = btn.dataset.eventId;
+        if (!confirm('Rewind to this step? Everything after will be discarded.')) return;
+        btn.disabled = true;
+        try {
+          const resp = await fetch('/sessions/' + sessionId + '/rewind', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({target_event_id: eventId}),
+          });
+          if (resp.ok) {
+            window.location.reload();
+          } else {
+            const txt = await resp.text();
+            alert('Rewind failed: ' + resp.status + ' — ' + txt);
+            btn.disabled = false;
+          }
+        } catch (e) {
+          alert('Error: ' + e);
+          btn.disabled = false;
+        }
+      });
+    });
+
     // NOTE: no polling. The page state only changes on explicit user actions
     // (POST /resume, POST /answer) which are synchronous and reload the page.
   })();

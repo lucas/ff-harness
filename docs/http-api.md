@@ -240,6 +240,46 @@ The handler reads the pending material's `content.kind` to decide which `Materia
 
 ---
 
+## `POST /sessions/{id}/rewind`
+
+Rewind a session to a previous `awaiting_human` event. Destructive but tracked: every event / material / checkpoint / alarm whose UUID7 id is greater than `target_event_id` is deleted, the original pending material is re-pended, a `rewound` audit event is appended, and the session row is reset to `awaiting_human` at the target's stage with `iter_since_approval=0`. The orchestrator loop is NOT invoked — the user submits a different answer via `POST /sessions/{id}/answer` to drive the loop forward. `spend_log` (core DB) is intentionally untouched: it represents real cost.
+
+- **Method:** `POST`
+- **Path:** `/sessions/{id}/rewind`
+- **Path params:** `id` — session UUID7.
+- **Query params:** none.
+- **Request body:**
+  ```json
+  {"target_event_id": "0190a8d4-9c20-7000-8000-000000000006"}
+  ```
+  - `target_event_id` (required, non-empty) — the `awaiting_human` event the session is reverting to.
+- **Behavior:**
+  1. Validate the session exists; otherwise `404`.
+  2. Validate the target event exists and is type `awaiting_human`; otherwise `400`.
+  3. In one transaction inside the per-session DB: delete events / alarms / checkpoints / material whose `id > target_event_id`, `UPDATE material SET pending = 1` on the target's `payload.material_id`, append a `rewound` event with the counts.
+  4. Update the core session row: `status='awaiting_human'`, `current_stage` from the target event's `stage`, `iter_since_approval=0`.
+- **Response body (200):**
+  ```json
+  {
+    "session_id": "...",
+    "target_event_id": "...",
+    "target_event_payload": {"material_id": "...", "reason": "ask_user"},
+    "removed_events": 12,
+    "removed_materials": 4,
+    "removed_checkpoints": 2,
+    "removed_alarms": 0,
+    "repended_material_id": "...",
+    "rewind_event_id": "..."
+  }
+  ```
+- **Status codes:**
+  - `200` — rewind applied; report dict returned.
+  - `400` — body missing/invalid, or `target_event_id` does not exist / is not an `awaiting_human` event; `error="bad_request"`.
+  - `404` — session not found; `error="not_found"`.
+- **Called by:** the Rewind button rendered on each `awaiting_human` row in the events table inside the Details accordion (`harness/templates/_session_main.html`). Confirms via a `confirm()` dialog before POSTing, then reloads the page on success.
+
+---
+
 ## Out of scope for v1
 
-`PATCH /sessions/{id}`, `DELETE /sessions/{id}`, paginated event fetch, auth — all deferred. The five routes above are sufficient for the demo flow and the four rubric pillars.
+`PATCH /sessions/{id}`, `DELETE /sessions/{id}`, paginated event fetch, auth — all deferred. The six routes above are sufficient for the demo flow and the four rubric pillars.

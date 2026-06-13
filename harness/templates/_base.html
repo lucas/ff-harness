@@ -362,6 +362,46 @@
     .event-row.event-model_swapped { background: var(--highlight-bg); }
     .event-row.highlight { background: var(--highlight-bg); }
     .events-truncated-note { font-size: 11px; color: var(--fg-faint); padding: 4px 0; }
+
+    /* Rewind button — small, subtle link-like affordance in the events
+       table. The confirm() dialog provides the safety net, so the visual
+       weight stays low. */
+    button.rewind-btn {
+      background: transparent;
+      color: var(--fg-faint);
+      border: 1px solid var(--border);
+      padding: 2px 8px;
+      font-size: 11px;
+      font-weight: 500;
+      text-transform: none;
+      letter-spacing: 0;
+    }
+    button.rewind-btn:hover {
+      background: var(--bg);
+      color: var(--fg);
+      border-color: var(--fg-faint);
+    }
+
+    /* Chat divider — used for `rewound` audit entries so they appear inline
+       in the chat as a centered horizontal-rule label rather than as a
+       user/agent bubble. */
+    .chat-divider {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+      color: var(--fg-faint);
+      font-size: 0.8em;
+      margin: 12px 0;
+    }
+    .chat-divider::before,
+    .chat-divider::after {
+      content: '';
+      flex: 1;
+      height: 1px;
+      background: var(--border);
+    }
+    .chat-divider-label { white-space: nowrap; }
   </style>
   {% block head %}{% endblock %}
 </head>

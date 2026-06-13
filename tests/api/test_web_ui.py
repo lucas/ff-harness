@@ -701,3 +701,103 @@ def test_session_view_renders_mockup_iframe(make_test_app):
     assert "mockup-card" in chat_section
     # No raw <pre> dump of the HTML — it lives inside the srcdoc attribute.
     assert "<pre>" not in chat_section
+
+
+# ---------------------------------------------------------------------------
+# 19. Events table renders a Rewind button on awaiting_human rows only
+# ---------------------------------------------------------------------------
+
+
+def test_events_table_has_rewind_button_on_awaiting_human_rows(make_test_app):
+    """Drive a session to an awaiting_human pause; GET /view; assert the
+    events table HTML contains a <button class="rewind-btn" data-event-id="...">
+    only on awaiting_human rows.
+    """
+    client, _ = make_test_app(
+        [
+            ToolCall(tool="ask_user", args={"question": "first?"}),
+            Final(summary="done"),
+        ]
+    )
+    sid = _create_session(client)
+    r = client.post(f"/sessions/{sid}/resume", json={})
+    assert r.status_code == 200
+    assert r.json()["status"] == "awaiting_human"
+
+    r = client.get(f"/sessions/{sid}/view")
+    assert r.status_code == 200
+    body = r.text
+
+    # Slice the events table region so we only look at button placement there.
+    events_start = body.find('id="events-card"')
+    assert events_start != -1
+    cost_start = body.find('id="cost-card"', events_start)
+    events_section = body[events_start:cost_start]
+
+    # There must be at least one rewind-btn with a non-empty data-event-id.
+    assert 'class="rewind-btn"' in events_section
+    m = re.search(
+        r'<button[^>]*class="rewind-btn"[^>]*data-event-id="([^"]+)"',
+        events_section,
+    )
+    assert m is not None, events_section[-2000:]
+    assert m.group(1), "data-event-id must not be empty"
+
+    # The Rewind button must NOT appear on non-awaiting_human rows. Count
+    # awaiting_human event rows; the count of rewind-btn occurrences must
+    # equal the count of awaiting_human row markers.
+    awaiting_row_count = events_section.count("event-awaiting_human")
+    rewind_count = events_section.count('class="rewind-btn"')
+    assert rewind_count == awaiting_row_count, (
+        f"expected {awaiting_row_count} rewind buttons, got {rewind_count}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 20. After POST /rewind, the chat log renders a `rewound` divider
+# ---------------------------------------------------------------------------
+
+
+def test_rewound_divider_renders_in_chat(make_test_app):
+    """Drive a session past an awaiting_human pause, rewind, GET /view, and
+    assert a `.chat-divider` with "Rewound" text appears in the chat log.
+    """
+    client, _ = make_test_app(
+        [
+            ToolCall(tool="ask_user", args={"question": "Q1"}),
+            ToolCall(tool="ask_user", args={"question": "Q2"}),
+            Final(summary="done"),
+        ]
+    )
+    sid = _create_session(client)
+    client.post(f"/sessions/{sid}/resume", json={})
+
+    detail = client.get(f"/sessions/{sid}").json()
+    first_awaiting = next(
+        e for e in detail["events"] if e["type"] == "awaiting_human"
+    )
+    pending_id = detail["pending_materials"][0]["id"]
+
+    # Drive forward to a second pause.
+    client.post(
+        f"/sessions/{sid}/answer",
+        json={"material_id": pending_id, "answer_text": "Alice"},
+    )
+
+    # Now rewind to the first pause.
+    r = client.post(
+        f"/sessions/{sid}/rewind",
+        json={"target_event_id": first_awaiting["id"]},
+    )
+    assert r.status_code == 200, r.text
+
+    r = client.get(f"/sessions/{sid}/view")
+    assert r.status_code == 200
+    body = r.text
+
+    chat_start = body.find('id="chat-log"')
+    chat_end = body.find('id="chat-input"', chat_start)
+    chat_section = body[chat_start:chat_end]
+
+    assert "chat-divider" in chat_section
+    assert "Rewound" in chat_section

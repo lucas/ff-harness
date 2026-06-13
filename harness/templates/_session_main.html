@@ -8,18 +8,24 @@
   <div class="chat-log" id="chat-log" aria-label="Conversation">
     {% if conversation %}
       {% for msg in conversation %}
-        <div class="chat-msg {{ msg.role }}">
-          {% if msg.ts %}<div class="chat-time">{{ msg.ts }}</div>{% endif %}
-          {# body_html is pre-escaped + (for agent text) markdown-rendered;
-             see view_helpers._render_markdown / _escape_plain. Safe to | safe. #}
-          <div class="chat-bubble">{{ msg.body_html | safe }}</div>
-          {% if msg.meta.tag %}
-            <span class="tag {{ msg.meta.tag }}">{{ msg.meta.tag }}</span>
-          {% endif %}
-          {% if msg.meta.options %}
-            <div class="chat-options">Options: {{ msg.meta.options | join(", ") }}</div>
-          {% endif %}
-        </div>
+        {% if msg.role == "divider" %}
+          <div class="chat-divider">
+            <span class="chat-divider-label">{{ msg.body }}</span>
+          </div>
+        {% else %}
+          <div class="chat-msg {{ msg.role }}">
+            {% if msg.ts %}<div class="chat-time">{{ msg.ts }}</div>{% endif %}
+            {# body_html is pre-escaped + (for agent text) markdown-rendered;
+               see view_helpers._render_markdown / _escape_plain. Safe to | safe. #}
+            <div class="chat-bubble">{{ msg.body_html | safe }}</div>
+            {% if msg.meta.tag %}
+              <span class="tag {{ msg.meta.tag }}">{{ msg.meta.tag }}</span>
+            {% endif %}
+            {% if msg.meta.options %}
+              <div class="chat-options">Options: {{ msg.meta.options | join(", ") }}</div>
+            {% endif %}
+          </div>
+        {% endif %}
       {% endfor %}
     {% else %}
       <div class="empty">No conversation yet. Click Resume to take the next turn.</div>
@@ -171,13 +177,18 @@
         </p>
       {% endif %}
       <table>
-        <thead><tr><th>Time</th><th>Type</th><th>Summary</th></tr></thead>
+        <thead><tr><th>Time</th><th>Type</th><th>Summary</th><th></th></tr></thead>
         <tbody>
           {% for e in formatted_events %}
             <tr class="event-row event-{{ e.type }} {% if e.highlight %}highlight{% endif %}">
               <td class="muted" style="white-space:nowrap;font-variant-numeric:tabular-nums;">{{ e.time }}</td>
               <td><span class="badge {{ e.badge_class }}">{{ e.type }}</span></td>
               <td>{{ e.summary }}</td>
+              <td style="white-space:nowrap;">
+                {% if e.type == "awaiting_human" %}
+                  <button type="button" class="rewind-btn" data-event-id="{{ e.id }}" title="Rewind to this step (discards everything after)">Rewind</button>
+                {% endif %}
+              </td>
             </tr>
           {% endfor %}
         </tbody>

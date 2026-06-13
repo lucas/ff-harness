@@ -220,6 +220,26 @@ class TestFormatEventForTable:
         assert out["summary"] == "brand_new_event_type"
         assert out["highlight"] is False
 
+    def test_format_event_for_table_handles_rewound(self) -> None:
+        ev = _event(
+            "rewound",
+            {
+                "target_event_id": "0190a8d4-9c20-7000-8000-000000000abc",
+                "removed_events": 7,
+                "removed_materials": 2,
+                "removed_checkpoints": 1,
+                "removed_alarms": 0,
+                "repended_material_id": "mat-x",
+            },
+        )
+        out = view_helpers.format_event_for_table(ev)
+        assert "Rewound" in out["summary"]
+        assert "0190a8d4" in out["summary"]
+        assert "7" in out["summary"]
+        assert out["highlight"] is True
+        # The event id is exposed so the template can render data-event-id.
+        assert "id" in out
+
 
 # ---------------------------------------------------------------------------
 # build_conversation
@@ -519,6 +539,42 @@ class TestBuildConversation:
             _event("alarm_raised", {"type": "tool_failed", "severity": "error"}),
         ]
         assert view_helpers.build_conversation(events, {}) == []
+
+    def test_rewound_event_renders_as_divider(self) -> None:
+        """A `rewound` event projects to a centered divider, not a bubble.
+
+        Other roles must remain untouched (user/agent bubbles still build).
+        """
+        events = [
+            _event(
+                "worker_output",
+                {
+                    "envelope": {
+                        "type": "tool_call",
+                        "tool": "ask_user",
+                        "args": {"question": "Q?"},
+                    }
+                },
+            ),
+            _event(
+                "rewound",
+                {
+                    "target_event_id": "0190a8d4-9c20-7000-8000-000000000aaa",
+                    "removed_events": 3,
+                    "removed_materials": 1,
+                    "removed_checkpoints": 0,
+                    "removed_alarms": 0,
+                    "repended_material_id": "mat-q",
+                },
+            ),
+        ]
+        msgs = view_helpers.build_conversation(events, {})
+        # First entry is the agent bubble; second is the divider.
+        assert msgs[0]["role"] == "agent"
+        assert msgs[1]["role"] == "divider"
+        assert "Rewound" in msgs[1]["body"]
+        assert "3" in msgs[1]["body"]
+        assert "events removed" in msgs[1]["body"]
 
 
 # ---------------------------------------------------------------------------

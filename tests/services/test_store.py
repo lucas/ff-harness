@@ -307,3 +307,204 @@ def test_parameterized_against_injection_shape(tmp_session):
     assert loaded["content"]["answer_text"] == nasty
     # Table still exists; this would raise OperationalError if dropped.
     assert store.load_pending_materials(session_conn) == []
+
+
+# ---------------------------------------------------------------------------
+# rewind_to_awaiting_human — destructive truncation by UUID7 id
+# ---------------------------------------------------------------------------
+
+
+def _build_rewind_fixture(session_conn: sqlite3.Connection) -> dict:
+    """Build a fixture session resembling: ask_user(A), awaiting_human(A),
+    human_resumed(A), worker_output(ask_user_2), awaiting_human(B),
+    human_resumed(B), plus a checkpoint and an alarm after the first pause.
+
+    Returns a dict of ids keyed for clarity in test assertions.
+    """
+    # Material A — the first ask_user's pending question (gets re-pended).
+    material_a = store.persist_material(
+        session_conn, "out", "bootstrap", "pending_question",
+        {"question": "Name?"}, pending=False,  # resolved when user answered
+    )
+    awaiting_a_event = store.append_event(
+        session_conn, "awaiting_human", "bootstrap",
+        {"material_id": material_a, "reason": "ask_user"},
+        material_id=material_a,
+    )
+    # User's answer material + the human_resumed event referencing it.
+    answer_a = store.persist_material(
+        session_conn, "in", "bootstrap", "user_answer",
+        {"answer_text": "Maria's"},
+    )
+    human_resumed_a = store.append_event(
+        session_conn, "human_resumed", "bootstrap",
+        {"material_id": answer_a, "answer_or_decision": {"answer_text": "Maria's"}},
+        material_id=answer_a,
+    )
+    # Next worker turn writes worker_output + a checkpoint and an alarm.
+    worker_output = store.append_event(
+        session_conn, "worker_output", "bootstrap",
+        {"envelope": {"type": "tool_call", "tool": "ask_user", "args": {}}},
+    )
+    checkpoint_after = store.persist_checkpoint(
+        session_conn, "business_brief_confirmed", "bootstrap", "pass", {"x": True},
+    )
+    alarm_after = store.persist_alarm(
+        session_conn, "tool_failed", "error", {"tool": "x"}, "act", "bootstrap",
+    )
+    # Second ask_user -> pending material B + awaiting_human(B) event.
+    material_b = store.persist_material(
+        session_conn, "out", "bootstrap", "pending_question",
+        {"question": "Industry?"}, pending=False,
+    )
+    awaiting_b_event = store.append_event(
+        session_conn, "awaiting_human", "bootstrap",
+        {"material_id": material_b, "reason": "ask_user"},
+        material_id=material_b,
+    )
+    answer_b = store.persist_material(
+        session_conn, "in", "bootstrap", "user_answer",
+        {"answer_text": "Restaurant"},
+    )
+    human_resumed_b = store.append_event(
+        session_conn, "human_resumed", "bootstrap",
+        {"material_id": answer_b, "answer_or_decision": {"answer_text": "Restaurant"}},
+        material_id=answer_b,
+    )
+    return {
+        "material_a": material_a,
+        "awaiting_a_event": awaiting_a_event,
+        "answer_a": answer_a,
+        "human_resumed_a": human_resumed_a,
+        "worker_output": worker_output,
+        "checkpoint_after": checkpoint_after,
+        "alarm_after": alarm_after,
+        "material_b": material_b,
+        "awaiting_b_event": awaiting_b_event,
+        "answer_b": answer_b,
+        "human_resumed_b": human_resumed_b,
+    }
+
+
+def test_rewind_to_awaiting_human_deletes_and_repends(tmp_session):
+    _, session_conn, _ = tmp_session
+    ids = _build_rewind_fixture(session_conn)
+
+    report = store.rewind_to_awaiting_human(session_conn, ids["awaiting_a_event"])
+
+    # Events after the rewind target are gone (six of them: human_resumed_a,
+    # worker_output, awaiting_b_event, human_resumed_b — checkpoints/alarms
+    # are NOT events so they're counted separately).
+    assert report["removed_events"] == 4
+    # Materials after the target: answer_a, material_b, answer_b = 3.
+    assert report["removed_materials"] == 3
+    assert report["removed_checkpoints"] == 1
+    assert report["removed_alarms"] == 1
+    assert report["target_event_id"] == ids["awaiting_a_event"]
+    assert report["repended_material_id"] == ids["material_a"]
+    assert isinstance(report["rewind_event_id"], str)
+
+    # Concrete state: material A is back to pending=1; material B is gone.
+    a = store.load_material(session_conn, ids["material_a"])
+    assert a is not None and a["pending"] is True
+    assert store.load_material(session_conn, ids["material_b"]) is None
+    assert store.load_material(session_conn, ids["answer_a"]) is None
+    assert store.load_material(session_conn, ids["answer_b"]) is None
+
+    # Events list: ends with the new `rewound` event AFTER the target.
+    events = store.load_events(session_conn)
+    types = [e["type"] for e in events]
+    assert types[-1] == "rewound"
+    # The events before the rewound entry must NOT include any post-target event.
+    surviving_ids = [e["id"] for e in events if e["type"] != "rewound"]
+    assert ids["awaiting_a_event"] in surviving_ids
+    assert ids["human_resumed_a"] not in surviving_ids
+    assert ids["worker_output"] not in surviving_ids
+    assert ids["awaiting_b_event"] not in surviving_ids
+    # The rewind event's payload carries the report counts.
+    rewound_payload = events[-1]["payload"]
+    assert rewound_payload["target_event_id"] == ids["awaiting_a_event"]
+    assert rewound_payload["removed_events"] == 4
+    assert rewound_payload["repended_material_id"] == ids["material_a"]
+
+
+def test_rewind_target_must_be_awaiting_human(tmp_session):
+    _, session_conn, _ = tmp_session
+    worker_output_id = store.append_event(
+        session_conn, "worker_output", "bootstrap",
+        {"envelope": {"type": "final", "summary": "ok"}},
+    )
+    with pytest.raises(ValueError):
+        store.rewind_to_awaiting_human(session_conn, worker_output_id)
+
+
+def test_rewind_target_must_exist(tmp_session):
+    _, session_conn, _ = tmp_session
+    with pytest.raises(ValueError):
+        store.rewind_to_awaiting_human(session_conn, "00000000-0000-7000-8000-000000000000")
+
+
+def test_rewind_appends_rewound_event_with_correct_payload(tmp_session):
+    _, session_conn, _ = tmp_session
+    ids = _build_rewind_fixture(session_conn)
+    report = store.rewind_to_awaiting_human(session_conn, ids["awaiting_a_event"])
+
+    events = store.load_events(session_conn)
+    rewound = next(e for e in events if e["type"] == "rewound")
+    assert rewound["id"] == report["rewind_event_id"]
+    # Stage is taken from the target event (bootstrap in the fixture).
+    assert rewound["stage"] == "bootstrap"
+    expected_keys = {
+        "target_event_id",
+        "removed_events",
+        "removed_materials",
+        "removed_checkpoints",
+        "removed_alarms",
+        "repended_material_id",
+    }
+    assert set(rewound["payload"].keys()) == expected_keys
+
+
+def test_rewind_inside_transaction_no_partial_delete_on_error(tmp_session, monkeypatch):
+    """A failure mid-transaction must roll back all deletes + the re-pend."""
+    _, session_conn, _ = tmp_session
+    ids = _build_rewind_fixture(session_conn)
+    snapshot_events_before = len(store.load_events(session_conn))
+    snapshot_materials_before = session_conn.execute(
+        "SELECT COUNT(*) AS n FROM material"
+    ).fetchone()["n"]
+
+    # Force json.dumps to raise during the rewound-event INSERT so the SQL
+    # inside the `with session_conn:` block aborts. The `with` context
+    # manager on a sqlite3 connection rolls back the transaction on
+    # exception, leaving every prior DELETE + UPDATE in the block reverted.
+    import harness.services.store as store_mod
+
+    original_dumps = store_mod.json.dumps
+    call_count = {"n": 0}
+
+    def flaky_dumps(*args, **kwargs):
+        # The rewind helper calls json.dumps exactly once (for the new
+        # rewound event's payload). Skip nothing; just fail every call —
+        # the first call inside the helper happens AFTER the deletes and
+        # the UPDATE, so a failure there exercises the rollback path.
+        call_count["n"] += 1
+        raise RuntimeError("simulated failure during audit-event insert")
+
+    monkeypatch.setattr(store_mod.json, "dumps", flaky_dumps)
+
+    with pytest.raises(RuntimeError, match="simulated failure"):
+        store.rewind_to_awaiting_human(session_conn, ids["awaiting_a_event"])
+
+    # Restore so subsequent assertions can read.
+    monkeypatch.setattr(store_mod.json, "dumps", original_dumps)
+
+    # DB is unchanged: same event count, same material count, material A
+    # is still resolved (pending=0).
+    assert len(store.load_events(session_conn)) == snapshot_events_before
+    assert (
+        session_conn.execute("SELECT COUNT(*) AS n FROM material").fetchone()["n"]
+        == snapshot_materials_before
+    )
+    a = store.load_material(session_conn, ids["material_a"])
+    assert a is not None and a["pending"] is False

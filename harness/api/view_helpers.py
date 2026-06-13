@@ -106,6 +106,7 @@ _BADGE_BY_TYPE: dict[str, str] = {
     "awaiting_human": "awaiting_human",
     "human_resumed": "pass",
     "model_swapped": "swapped",
+    "rewound": "swapped",
 }
 
 
@@ -232,10 +233,17 @@ def format_event_for_table(event: dict) -> dict:
         to_m = payload.get("to", "?")
         reason = payload.get("reason", "?")
         summary = f"Model swap: {from_m} -> {to_m} ({reason})"
+    elif etype == "rewound":
+        target_id = payload.get("target_event_id") or ""
+        target_short = target_id[:8] if isinstance(target_id, str) else "?"
+        removed = payload.get("removed_events", 0)
+        summary = f"Rewound to {target_short} (removed {removed} events)"
+        highlight = True
     else:
         summary = etype
 
     return {
+        "id": event.get("id", ""),
         "time": format_time_hms(ts) if ts else "",
         "type": etype,
         "badge_class": badge_class,
@@ -630,6 +638,26 @@ def build_conversation(
         etype = event.get("type")
         payload = _as_dict(event.get("payload"))
         ts = format_time_hms(event.get("ts", "")) if event.get("ts") else ""
+
+        if etype == "rewound":
+            removed = (
+                payload.get("removed_events")
+                if isinstance(payload, dict)
+                else 0
+            )
+            try:
+                removed_int = int(removed) if removed is not None else 0
+            except (TypeError, ValueError):
+                removed_int = 0
+            body = f"Rewound to a previous step. {removed_int} events removed."
+            out.append({
+                "role": "divider",
+                "body": body,
+                "body_html": html.escape(body),
+                "ts": ts,
+                "meta": {},
+            })
+            continue
 
         if etype == "human_resumed":
             answer = _as_dict(payload.get("answer_or_decision"))

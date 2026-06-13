@@ -1718,3 +1718,162 @@ def test_tool_failed_alarm_never_auto_resolved(orchestrator_setup):
     assert alarm["resolved"] is False, (
         "tool_failed is event-based; must never be auto-resolved"
     )
+
+
+# ---------------------------------------------------------------------------
+# rewind_session — destructive truncation + session-row reset
+# ---------------------------------------------------------------------------
+
+
+def test_rewind_session_updates_status_and_iter(orchestrator_setup):
+    """Rewind to an awaiting_human event flips status/stage/iter on the row."""
+    from harness.services.orchestrator import rewind_session
+
+    setup = orchestrator_setup
+    session_id = setup["session_id"]
+
+    # Drive a session that pauses on an ask_user.
+    scripted: list[ToolCall | Final | Escalate] = [
+        ToolCall(tool="ask_user", args={"question": "What is your name?"}),
+        ToolCall(tool="ask_user", args={"question": "Second?"}),
+        Final(summary="done"),
+    ]
+    worker = MockWorker(scripted_responses=scripted)
+    workers_by_stage = {Stage.BOOTSTRAP.value: worker}
+    config = _build_config(
+        core_db_path=setup["core_db_path"],
+        sessions_dir=setup["sessions_dir"],
+        sandbox_root=setup["sandbox_root"],
+        workers_by_stage=workers_by_stage,
+    )
+
+    # First pause on ask_user(1).
+    r1 = run_until_pause(session_id, config)
+    assert r1.status == SessionStatus.AWAITING_HUMAN.value
+
+    # Capture the first awaiting_human event id.
+    with setup["session_conn_factory"]() as session_conn:
+        events = store.load_events(session_conn)
+    first_awaiting = next(
+        e for e in events if e["type"] == EventType.AWAITING_HUMAN.value
+    )
+
+    # Answer the first question; the worker proceeds and pauses again.
+    with setup["session_conn_factory"]() as session_conn:
+        pending = _last_awaiting_pending_material_id(session_conn)
+        _simulate_human_answer(
+            setup["core_conn"], session_conn, session_id,
+            pending_material_id=pending, answer_text="Alice",
+            stage=Stage.BOOTSTRAP.value,
+        )
+    r2 = run_until_pause(session_id, config)
+    assert r2.status == SessionStatus.AWAITING_HUMAN.value
+
+    # Force the iter counter high so we can prove rewind resets it.
+    store.update_session_status(
+        setup["core_conn"], session_id, SessionStatus.AWAITING_HUMAN.value,
+        iter_since_approval=5,
+    )
+
+    # Rewind to the FIRST awaiting_human.
+    with setup["session_conn_factory"]() as session_conn:
+        report = rewind_session(
+            session_id, first_awaiting["id"],
+            core_conn=setup["core_conn"],
+            session_conn=session_conn,
+        )
+
+    assert report["session_id"] == session_id
+    assert report["target_event_id"] == first_awaiting["id"]
+    assert report["repended_material_id"] == first_awaiting["payload"]["material_id"]
+
+    session_row = store.load_session(setup["core_conn"], session_id)
+    assert session_row is not None
+    assert session_row["status"] == SessionStatus.AWAITING_HUMAN.value
+    assert session_row["current_stage"] == first_awaiting["stage"]
+    assert int(session_row["iter_since_approval"]) == 0
+
+
+def test_rewind_session_then_answer_continues_normally(orchestrator_setup):
+    """After a rewind, /answer with a different answer drives the loop afresh."""
+    from harness.services.orchestrator import rewind_session
+
+    setup = orchestrator_setup
+    session_id = setup["session_id"]
+
+    # MockWorker that emits 5 scripted responses across two paths. The script
+    # is consumed in order regardless of rewinds (MockWorker is stateful),
+    # so we use a script long enough for: turn 1 (ask_user A), turn 2 (Final
+    # after first answer), then turn 3 (ask_user A again after rewind),
+    # turn 4 (Final after second answer).
+    scripted: list[ToolCall | Final | Escalate] = [
+        ToolCall(tool="ask_user", args={"question": "Pick"}),
+        Final(summary="path-1"),
+        ToolCall(tool="ask_user", args={"question": "Pick"}),
+        Final(summary="path-2"),
+    ]
+    worker = MockWorker(scripted_responses=scripted)
+    workers_by_stage = {
+        Stage.BOOTSTRAP.value: worker,
+        Stage.MOCKUP.value: worker,
+        Stage.BUILD.value: worker,
+    }
+    config = _build_config(
+        core_db_path=setup["core_db_path"],
+        sessions_dir=setup["sessions_dir"],
+        sandbox_root=setup["sandbox_root"],
+        workers_by_stage=workers_by_stage,
+    )
+
+    # Turn 1: pause on ask_user.
+    run_until_pause(session_id, config)
+    with setup["session_conn_factory"]() as session_conn:
+        events_after_pause1 = store.load_events(session_conn)
+        first_awaiting = next(
+            e for e in events_after_pause1
+            if e["type"] == EventType.AWAITING_HUMAN.value
+        )
+        pending_first = _last_awaiting_pending_material_id(session_conn)
+        _simulate_human_answer(
+            setup["core_conn"], session_conn, session_id,
+            pending_material_id=pending_first, answer_text="first-answer",
+            stage=Stage.BOOTSTRAP.value,
+        )
+
+    # Turn 2: completes with Final("path-1").
+    r2 = run_until_pause(session_id, config)
+    assert r2.status == SessionStatus.COMPLETED.value
+
+    # Rewind back to the first awaiting_human.
+    with setup["session_conn_factory"]() as session_conn:
+        rewind_session(
+            session_id, first_awaiting["id"],
+            core_conn=setup["core_conn"],
+            session_conn=session_conn,
+        )
+
+    # Answer the (re-pended) material differently. The next loop call
+    # should produce the second Final via the second scripted ask_user pause.
+    with setup["session_conn_factory"]() as session_conn:
+        pending_again = _last_awaiting_pending_material_id(session_conn)
+        # The re-pended material is the SAME id as the one we answered before.
+        assert pending_again == pending_first
+        _simulate_human_answer(
+            setup["core_conn"], session_conn, session_id,
+            pending_material_id=pending_again, answer_text="second-answer",
+            stage=Stage.BOOTSTRAP.value,
+        )
+
+    # Next run consumes the next two scripted responses: ask_user + Final.
+    r3 = run_until_pause(session_id, config)
+    assert r3.status == SessionStatus.AWAITING_HUMAN.value
+    # Answer the new pause to drive the Final.
+    with setup["session_conn_factory"]() as session_conn:
+        pending_new = _last_awaiting_pending_material_id(session_conn)
+        _simulate_human_answer(
+            setup["core_conn"], session_conn, session_id,
+            pending_material_id=pending_new, answer_text="x",
+            stage=Stage.BOOTSTRAP.value,
+        )
+    r4 = run_until_pause(session_id, config)
+    assert r4.status == SessionStatus.COMPLETED.value

@@ -61,6 +61,7 @@ from harness.services import store
 from harness.services.orchestrator import (
     RunResult,
     force_continue,
+    rewind_session,
     run_until_pause,
 )
 
@@ -97,6 +98,14 @@ class AnswerRequest(BaseModel):
 
 class ResumeRequest(BaseModel):
     """POST /sessions/{id}/resume body — empty object per spec."""
+
+    model_config = ConfigDict(extra="ignore")
+
+
+class RewindRequest(BaseModel):
+    """POST /sessions/{id}/rewind body — see docs/http-api.md."""
+
+    target_event_id: str = Field(..., min_length=1)
 
     model_config = ConfigDict(extra="ignore")
 
@@ -498,6 +507,49 @@ def _create_app_routes(app: FastAPI) -> None:
 
         result = _run_loop_for(ctx, session_id)
         return _serialize_run_result(result)
+
+    @app.post("/sessions/{session_id}/rewind")
+    def rewind_route(
+        session_id: str,
+        body: RewindRequest,
+        ctx: AppContext = Depends(get_app_context),
+    ) -> dict:
+        """Rewind a session to a previous ``awaiting_human`` event.
+
+        Truncates per-session events / materials / checkpoints / alarms whose
+        id is greater than ``target_event_id``, re-pends the original pending
+        material, appends a ``rewound`` audit event, and resets the core
+        session row to ``awaiting_human`` at the target's stage with
+        ``iter_since_approval=0``. The orchestrator loop is NOT invoked — the
+        user will respond via ``POST /sessions/{id}/answer`` which drives the
+        loop forward as usual.
+        """
+        with open_connections(ctx) as conns:
+            assert conns.core_conn is not None
+            session = store.load_session(conns.core_conn, session_id)
+        if session is None:
+            raise _not_found("not_found", {"session_id": session_id})
+
+        with open_connections(ctx, session_id=session_id) as conns:
+            assert conns.core_conn is not None
+            assert conns.session_conn is not None
+            try:
+                report = rewind_session(
+                    session_id,
+                    body.target_event_id,
+                    core_conn=conns.core_conn,
+                    session_conn=conns.session_conn,
+                )
+            except ValueError as exc:
+                raise _bad_request(
+                    "bad_request",
+                    {
+                        "reason": str(exc),
+                        "session_id": session_id,
+                        "target_event_id": body.target_event_id,
+                    },
+                ) from exc
+        return report
 
     # -------------------- HTML routes (web UI) --------------------
 
