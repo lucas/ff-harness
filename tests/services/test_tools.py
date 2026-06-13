@@ -449,3 +449,142 @@ def test_render_mockup_bad_spec(tmp_session, sandbox_dir, spec, kind):
     ctx = make_ctx(tmp_session, sandbox_dir)
     result = dispatch("render_mockup", {"layout_spec": spec}, ctx)
     assert _err(result)["error_kind"] == kind
+
+
+# ---------------------------------------------------------------------------
+# render_mockup — themed HTML output (the iframe-preview pipeline)
+# ---------------------------------------------------------------------------
+
+
+def _persist_brief(session_conn, content: dict) -> str:
+    """Helper: write a business_brief material into the session DB."""
+    return store.persist_material(
+        session_conn,
+        direction="out",
+        stage="bootstrap",
+        type=MaterialType.BUSINESS_BRIEF.value,
+        content=content,
+        pending=False,
+    )
+
+
+def test_render_mockup_includes_html_in_result_and_material(tmp_session, sandbox_dir):
+    _core, session_conn, _sid = tmp_session
+    ctx = make_ctx(tmp_session, sandbox_dir, stage="mockup")
+
+    result = dispatch("render_mockup", {"layout_spec": _spec()}, ctx)
+    out = _ok(result)
+
+    # Result carries the html doc.
+    assert "html" in out
+    assert isinstance(out["html"], str) and out["html"]
+    assert out["html"].lower().startswith("<!doctype")
+    assert "themed" in out
+    # No brief on file -> themed=False.
+    assert out["themed"] is False
+
+    # Material content carries html + themed alongside the original fields.
+    row = store.load_material(session_conn, out["material_id"])
+    assert row is not None
+    content = row["content"]
+    assert content["ascii"] == out["ascii"]
+    assert content["regions"] == out["regions"]
+    assert content["html"] == out["html"]
+    assert content["themed"] is False
+
+
+def test_render_mockup_html_is_themed_when_brief_present(tmp_session, sandbox_dir):
+    _core, session_conn, _sid = tmp_session
+    _persist_brief(
+        session_conn,
+        {
+            "name": "Maria's Pizzeria",
+            "tagline": "Wood-fired pizza, made by hand.",
+            "palette": {"primary": "#7B1E1E", "secondary": "#F5E9DA"},
+        },
+    )
+    ctx = make_ctx(tmp_session, sandbox_dir, stage="mockup")
+
+    result = dispatch("render_mockup", {"layout_spec": _spec()}, ctx)
+    out = _ok(result)
+
+    assert out["themed"] is True
+    html_doc = out["html"]
+    # Brand name surfaces in the HTML (HTML-escaped — apostrophe -> &#x27;).
+    assert "Maria&#x27;s Pizzeria" in html_doc
+    # Tagline surfaces too.
+    assert "Wood-fired pizza, made by hand." in html_doc
+    # Palette hex values appear in the inline style block.
+    assert "#7B1E1E" in html_doc
+    assert "#F5E9DA" in html_doc
+
+
+def test_render_mockup_html_is_neutral_without_brief(tmp_session, sandbox_dir):
+    ctx = make_ctx(tmp_session, sandbox_dir, stage="mockup")
+
+    result = dispatch("render_mockup", {"layout_spec": _spec()}, ctx)
+    out = _ok(result)
+
+    assert out["themed"] is False
+    html_doc = out["html"]
+    # No brief-specific name leaks into the document.
+    assert "Maria" not in html_doc
+    # Document is still valid and complete.
+    assert html_doc.lower().startswith("<!doctype")
+    assert "</html>" in html_doc
+
+
+def test_render_mockup_html_rejects_malicious_palette_value(
+    tmp_session, sandbox_dir
+):
+    _core, session_conn, _sid = tmp_session
+    _persist_brief(
+        session_conn,
+        {
+            "name": "Demo",
+            "palette": {
+                "primary": "javascript:alert(1)",
+                "secondary": "url(javascript:alert(2))",
+            },
+        },
+    )
+    ctx = make_ctx(tmp_session, sandbox_dir, stage="mockup")
+
+    result = dispatch("render_mockup", {"layout_spec": _spec()}, ctx)
+    html_doc = _ok(result)["html"]
+
+    # Non-hex values are rejected outright — they never reach the output.
+    assert "javascript:" not in html_doc
+    assert "alert(" not in html_doc
+
+
+def test_render_mockup_html_escapes_brief_name(tmp_session, sandbox_dir):
+    _core, session_conn, _sid = tmp_session
+    _persist_brief(session_conn, {"name": "<script>x</script>"})
+    ctx = make_ctx(tmp_session, sandbox_dir, stage="mockup")
+
+    result = dispatch("render_mockup", {"layout_spec": _spec()}, ctx)
+    html_doc = _ok(result)["html"]
+
+    # No live <script> tag in the rendered HTML — the brief name is escaped.
+    assert "<script>x</script>" not in html_doc
+    assert "&lt;script&gt;x&lt;/script&gt;" in html_doc
+
+
+def test_render_mockup_ascii_unchanged_when_brief_present(tmp_session, sandbox_dir):
+    """ASCII output must remain byte-identical regardless of brief/themed state
+    — the mockup_renders checkpoint and screen-reader path depend on it."""
+    _core, session_conn, _sid = tmp_session
+    ctx = make_ctx(tmp_session, sandbox_dir, stage="mockup")
+    no_brief = _ok(dispatch("render_mockup", {"layout_spec": _spec()}, ctx))["ascii"]
+
+    _persist_brief(
+        session_conn,
+        {
+            "name": "Anything",
+            "palette": {"primary": "#7B1E1E", "secondary": "#F5E9DA"},
+        },
+    )
+    with_brief = _ok(dispatch("render_mockup", {"layout_spec": _spec()}, ctx))["ascii"]
+
+    assert no_brief == with_brief

@@ -337,6 +337,24 @@ def load_material(session_conn: sqlite3.Connection, material_id: str) -> dict | 
     return _decode_material(row) if row else None
 
 
+def latest_material_by_type(
+    session_conn: sqlite3.Connection, type: str
+) -> dict | None:
+    """Return the most recent material of a given type, or None.
+
+    Ordering by `id DESC` works because UUID7 ids are time-ordered (first
+    48 bits are a millisecond timestamp). Used by tools that need to read
+    the most recent persisted material of a known type (e.g. `render_mockup`
+    looking up the latest `business_brief` for theming).
+    """
+    row = session_conn.execute(
+        "SELECT id, direction, stage, type, content, pending, created_at"
+        " FROM material WHERE type = ? ORDER BY id DESC LIMIT 1",
+        (type,),
+    ).fetchone()
+    return _decode_material(row) if row else None
+
+
 def _decode_material(row: sqlite3.Row) -> dict:
     d = dict(row)
     d["content"] = json.loads(d["content"])

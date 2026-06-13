@@ -257,7 +257,7 @@ WorkerResponse = Annotated[ToolCall | Final | Escalate, Field(discriminator='typ
 | `user_answer` | in | `/answer` POST | `{answer_text}` |
 | `user_approval` | in | `/answer` POST for approval | `{approved: bool, notes?}` |
 | `layout_spec` | out | worker chose mockup layout | `{sections: [...], primary_cta}` |
-| `mockup` | out | `render_mockup` returned | `{ascii: str, regions: [...]}` |
+| `mockup` | out | `render_mockup` returned | `{ascii: str, regions: [...], html: str, themed: bool}` (HTML is a self-contained themed wireframe; rendered inline in the chat panel as a sandboxed iframe via `srcdoc`) |
 | `site_file` | out | `write_file` succeeded | `{path, content_hash, bytes}` |
 | `validation_result` | out | post-hook validators ran | `{html: {...}, seo: {...}}` |
 
@@ -296,7 +296,7 @@ All six are worker-callable. `ask_user` and `request_approval` are escalation su
 |---|---|---|---|---|
 | `ask_user` | `{question: str, options?: list[str]}` | `ToolResult(ok=True, result={paused: True, material_id})` | n/a | no |
 | `request_approval` | `{summary: str, payload: dict}` | `ToolResult(ok=True, result={paused: True, material_id})` | n/a | no |
-| `render_mockup` | `{layout_spec: dict}` | `ToolResult(ok=True, result={ascii: str, regions: list})` | n/a | no |
+| `render_mockup` | `{layout_spec: dict}` | `ToolResult(ok=True, result={ascii, regions, html, themed})` (themed iff a `business_brief` material is on file; HTML is a self-contained `<!doctype html>` document for iframe preview) | n/a | no |
 | `read_file` | `{path: str}` | `ToolResult(ok=True, result={content: str})` | yes (sandbox_path) | no |
 | `write_file` | `{path: str, content: str}` | `ToolResult(ok=True, result={path, bytes})` | yes (sandbox_path) | **yes** |
 | `list_files` | `{path?: str}` | `ToolResult(ok=True, result={entries: list[str]})` | yes (sandbox_path) | no |
@@ -375,7 +375,7 @@ The session detail page is **chat-first**. Layout, top to bottom:
 
 **Conversation projection** (`build_conversation` in `harness/api/view_helpers.py`): each session event becomes zero or one chat bubble.
 - `human_resumed` → user bubble. The body depends on the answer's `kind`: `"approval"` renders "Approved/Denied {subject}"; `"continuation_approval"` renders "Approve continuation"/"Stop"; missing `kind` renders the literal `answer_text`.
-- `worker_output` → agent bubble. `final` envelopes render the summary with a "final" tag; `escalate` envelopes render the reason with an "escalate" tag; `tool_call` envelopes use per-tool templates (`ask_user` → the question text, `request_approval` → a subject-aware approval card (see "Approval bubbles" below), `render_mockup` → `Rendered mockup ({N} sections)`, `write_file` / `read_file` / `list_files` → one-line file action summaries).
+- `worker_output` → agent bubble. `final` envelopes render the summary with a "final" tag; `escalate` envelopes render the reason with an "escalate" tag; `tool_call` envelopes use per-tool templates (`ask_user` → the question text, `request_approval` → a subject-aware approval card (see "Approval bubbles" below), `render_mockup` → a `mockup-card` containing a caption (`Mockup preview ({N} sections[, themed])`) and a sandboxed `<iframe class="mockup-preview" sandbox="" srcdoc="...">` whose document is the themed HTML from the persisted `mockup` material (looked up via `materials_by_id`); when no mockup material is available the bubble falls back to the plain `Rendered mockup ({N} sections)` summary, `write_file` / `read_file` / `list_files` → one-line file action summaries).
 
 **Approval bubbles** (`request_approval`): the bubble body is a card rendered by `_render_approval_card` in `harness/api/view_helpers.py` — no raw JSON, no `<details>` expander is ever shown to the end user. `subject == 'business_brief'` renders a card with hoisted name + tagline headings and a `<dl class="brief-rows">` grid of known fields (industry, contact, hours, palette, pages, primary_cta, socials, …); palette dicts emit small inline `.swatch` color chips next to hex codes (only after the value matches `^#[0-9A-Fa-f]{3,8}$` — any other value renders as escaped text only); `hours` keys map to human day-range labels (`mon_thu` → `Mon–Thu`); a `contact` sub-dict is hoisted so `phone`/`email`/`address` appear as top-level rows; `socials` renders inline as `Instagram: @x, Twitter: @y`. `subject == 'mockup'` renders a compact heading + "Approve the layout above to proceed" prompt (the ASCII art lives in the prior `render_mockup` bubble, not here) plus an optional sections / primary CTA summary if `details` supplied them. Any other subject falls back to `Heading (subject title-cased) + labeled list` of every top-level key. All user-derived values are HTML-escaped via `html.escape` before concatenation — the card bypasses mistune and emits HTML directly.
 - All other event types are skipped from the chat (they appear in the Details accordion's events table).

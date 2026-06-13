@@ -343,6 +343,21 @@
     }
     .chat-bubble .approval-prompt { margin: 8px 0 0; color: #555; }
 
+    /* Mockup-preview card rendered inside a chat bubble (render_mockup). */
+    .chat-bubble .mockup-card { display: block; }
+    .chat-bubble .mockup-caption {
+      font-size: 0.85em;
+      color: #666;
+      margin-bottom: 6px;
+    }
+    .chat-bubble .mockup-preview {
+      display: block;
+      width: 100%;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      background: white;
+    }
+
     /* Events table — keep the model-swap highlight visible */
     .event-row.event-model_swapped { background: var(--highlight-bg); }
     .event-row.highlight { background: var(--highlight-bg); }

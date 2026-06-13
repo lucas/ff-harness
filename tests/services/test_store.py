@@ -125,6 +125,30 @@ def test_material_roundtrip(tmp_session):
     assert resolved["pending"] is False
 
 
+def test_latest_material_by_type_returns_most_recent(tmp_session):
+    _, session_conn, _ = tmp_session
+    # Write three materials of the same type; ids are UUID7 so insertion
+    # order matches `id DESC` order.
+    a = store.persist_material(session_conn, "out", "bootstrap", "business_brief", {"name": "first"})
+    b = store.persist_material(session_conn, "out", "bootstrap", "business_brief", {"name": "second"})
+    c = store.persist_material(session_conn, "out", "bootstrap", "business_brief", {"name": "third"})
+    # And a noise row of a different type.
+    store.persist_material(session_conn, "out", "build", "site_file", {"path": "x"})
+
+    latest = store.latest_material_by_type(session_conn, "business_brief")
+    assert latest is not None
+    assert latest["id"] == c
+    assert latest["content"] == {"name": "third"}
+
+    # Distinct ids exercised, no off-by-one.
+    assert a != b != c
+
+
+def test_latest_material_by_type_missing_returns_none(tmp_session):
+    _, session_conn, _ = tmp_session
+    assert store.latest_material_by_type(session_conn, "business_brief") is None
+
+
 def test_load_pending_materials_oldest_first(tmp_session):
     _, session_conn, _ = tmp_session
     a = store.persist_material(session_conn, "out", "bootstrap", "pending_question", {"q": "a"}, pending=True)

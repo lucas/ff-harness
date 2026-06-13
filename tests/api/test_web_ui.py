@@ -649,3 +649,55 @@ def test_session_view_renders_brief_approval_card(make_test_app):
     assert "<pre>" not in chat_section
     # No `<details>` wrapping the approval JSON in the chat section.
     assert "Approval details</summary>" not in chat_section
+
+
+# ---------------------------------------------------------------------------
+# 18. render_mockup chat bubble renders a sandboxed iframe preview
+# ---------------------------------------------------------------------------
+
+
+def test_session_view_renders_mockup_iframe(make_test_app):
+    """End-to-end: a render_mockup tool_call must produce a chat bubble
+    containing a sandboxed iframe with a srcdoc attribute carrying the
+    themed HTML mockup. No script execution path — sandbox="" is fully
+    restrictive.
+    """
+    responses: list[ToolCall | Final | Escalate] = [
+        ToolCall(
+            tool="render_mockup",
+            args={
+                "layout_spec": {
+                    "sections": [
+                        {"name": "Header"},
+                        {"name": "Hero"},
+                        {"name": "Menu"},
+                        {"name": "Footer"},
+                    ],
+                    "primary_cta": "Reserve",
+                }
+            },
+        ),
+        Final(summary="mockup rendered"),
+    ]
+    client, _ = make_test_app(responses)
+    sid = _create_session(client)
+    r = client.post(f"/sessions/{sid}/resume", json={})
+    assert r.status_code == 200
+    assert r.json()["status"] == "completed"
+
+    r = client.get(f"/sessions/{sid}/view")
+    assert r.status_code == 200
+    body = r.text
+
+    chat_start = body.find('id="chat-log"')
+    chat_end = body.find('id="chat-input"', chat_start)
+    chat_section = body[chat_start:chat_end]
+
+    # The iframe preview must be present in the chat panel.
+    assert "<iframe" in chat_section
+    assert 'sandbox=""' in chat_section
+    assert "srcdoc=" in chat_section
+    # The mockup-card wrapper renders.
+    assert "mockup-card" in chat_section
+    # No raw <pre> dump of the HTML — it lives inside the srcdoc attribute.
+    assert "<pre>" not in chat_section

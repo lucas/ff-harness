@@ -697,7 +697,9 @@ def build_conversation(
             if wt == "tool_call":
                 tool = envelope.get("tool", "")
                 args = _as_dict(envelope.get("args"))
-                body, extra, render_md = _tool_call_body(tool, args)
+                body, extra, render_md = _tool_call_body(
+                    tool, args, materials_by_id
+                )
                 # Approval bubbles (and any future tool that builds its own
                 # HTML) pass a pre-rendered, already-escaped fragment via
                 # ``body_html`` in the extra dict. When present, that wins
@@ -725,14 +727,39 @@ def build_conversation(
 
         # All other event types are not part of the chat — they live in the
         # Details accordion's events table.
-    # materials_by_id is reserved for future enrichment (currently the
-    # answer payload already carries kind + subject). Touch the arg so type
-    # checkers see it's intentionally accepted.
-    _ = materials_by_id
     return out
 
 
-def _tool_call_body(tool: str, args: dict) -> tuple[str, dict, bool]:
+def _latest_mockup_html(materials_by_id: dict[str, dict]) -> tuple[str, bool] | None:
+    """Return (html_doc, themed) for the most recent mockup material, or None.
+
+    Searches the resolved materials map for `type == 'mockup'` rows whose
+    content carries an `html` string. Ordering: materials are inserted into
+    the dict in id order (UUID7, time-ordered) by the caller, so iterating
+    and keeping the last hit gives the latest mockup.
+    """
+    latest_html: str | None = None
+    latest_themed = False
+    for mat in materials_by_id.values():
+        if not isinstance(mat, dict):
+            continue
+        if mat.get("type") != "mockup":
+            continue
+        content = mat.get("content")
+        if not isinstance(content, dict):
+            continue
+        html_doc = content.get("html")
+        if isinstance(html_doc, str) and html_doc:
+            latest_html = html_doc
+            latest_themed = bool(content.get("themed"))
+    if latest_html is None:
+        return None
+    return latest_html, latest_themed
+
+
+def _tool_call_body(
+    tool: str, args: dict, materials_by_id: dict[str, dict] | None = None
+) -> tuple[str, dict, bool]:
     """Render a per-tool bubble body.
 
     Returns ``(body, meta_extras, render_markdown)``. ``render_markdown=True``
@@ -764,7 +791,36 @@ def _tool_call_body(tool: str, args: dict) -> tuple[str, dict, bool]:
         layout = _as_dict(args.get("layout_spec"))
         sections_raw = layout.get("sections")
         sections = sections_raw if isinstance(sections_raw, list) else []
-        return f"Rendered mockup ({len(sections)} sections)", {}, False
+        n_sections = len(sections)
+        plain = f"Rendered mockup ({n_sections} sections)"
+        # If we can find the persisted mockup material, embed its themed
+        # HTML inside a sandboxed iframe preview. Otherwise fall back to
+        # the plain text summary (existing behavior).
+        preview = (
+            _latest_mockup_html(materials_by_id)
+            if materials_by_id
+            else None
+        )
+        if preview is None:
+            return plain, {}, False
+        html_doc, themed = preview
+        caption = f"Mockup preview ({n_sections} sections"
+        caption += ", themed)" if themed else ")"
+        # srcdoc requires HTML-attribute escaping of the entire document.
+        # html.escape(..., quote=True) handles ``"``, ``'``, ``<``, ``>``,
+        # ``&`` — enough for srcdoc placement. The inner document is
+        # already HTML-escaped at every user-data insertion point by
+        # `_build_mockup_html`.
+        srcdoc = html.escape(html_doc, quote=True)
+        card_html = (
+            '<div class="mockup-card">'
+            f'<div class="mockup-caption">{html.escape(caption)}</div>'
+            '<iframe class="mockup-preview" sandbox="" '
+            f'srcdoc="{srcdoc}" loading="lazy" '
+            'width="100%" height="420"></iframe>'
+            "</div>"
+        )
+        return plain, {"body_html": card_html}, False
     if tool == "write_file":
         path = args.get("path", "?")
         content = args.get("content")
