@@ -58,7 +58,11 @@ from harness.models.enums import (
     Stage,
 )
 from harness.services import store
-from harness.services.orchestrator import RunResult, run_until_pause
+from harness.services.orchestrator import (
+    RunResult,
+    force_continue,
+    run_until_pause,
+)
 
 
 # Templates env shared by all HTML routes.  Resolved relative to this module
@@ -355,6 +359,22 @@ def _create_app_routes(app: FastAPI) -> None:
             session = store.load_session(conns.core_conn, session_id)
         if session is None:
             raise _not_found("not_found", {"session_id": session_id})
+
+        # User-driven /resume implicitly approves safety-cap gates and
+        # unsticks an awaiting_human session. force_continue auto-approves
+        # any pending continuation_approval materials, resets the iter
+        # counter, and flips status back to active so run_until_pause has
+        # something to run. Freeform ask_user / subject approvals are left
+        # pending — those are real content gates and still require /answer.
+        if session["status"] == SessionStatus.AWAITING_HUMAN.value:
+            with open_connections(ctx, session_id=session_id) as conns:
+                assert conns.core_conn is not None
+                assert conns.session_conn is not None
+                force_continue(
+                    session_id,
+                    core_conn=conns.core_conn,
+                    session_conn=conns.session_conn,
+                )
 
         result = _run_loop_for(ctx, session_id)
         return _serialize_run_result(result)

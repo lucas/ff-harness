@@ -50,6 +50,7 @@ from harness.services.orchestrator import (
     PAUSE_SPEND_CAP,
     PAUSE_TOOL_FAILED,
     PAUSE_TURN_CAP,
+    force_continue,
     run_until_pause,
 )
 from harness.services.worker import MockWorker
@@ -1358,6 +1359,323 @@ def test_spend_cap_alarm_resolves_when_spend_drops(orchestrator_setup):
     assert alarm_after["resolved"] is True, (
         "spend_cap_reached alarm should auto-resolve when spend drops below cap"
     )
+
+
+# ---------------------------------------------------------------------------
+# force_continue — /resume unstick helper
+# ---------------------------------------------------------------------------
+
+
+def _seed_pending_continuation(
+    session_conn: sqlite3.Connection,
+    *,
+    stage: str = Stage.BOOTSTRAP.value,
+    iter_count: int = 10,
+) -> str:
+    """Persist a pending continuation_approval material directly (no loop)."""
+    return store.persist_material(
+        session_conn,
+        direction=Direction.OUT.value,
+        stage=stage,
+        type=MaterialType.PENDING_QUESTION.value,
+        content={
+            "kind": "continuation_approval",
+            "question": "Approve another 10 iterations?",
+            "iter_count": iter_count,
+        },
+        pending=True,
+    )
+
+
+def _seed_pending_ask_user(
+    session_conn: sqlite3.Connection,
+    *,
+    stage: str = Stage.BOOTSTRAP.value,
+    question: str = "What is your business name?",
+) -> str:
+    """Persist a pending freeform ask_user question (no kind field)."""
+    return store.persist_material(
+        session_conn,
+        direction=Direction.OUT.value,
+        stage=stage,
+        type=MaterialType.PENDING_QUESTION.value,
+        content={"question": question},
+        pending=True,
+    )
+
+
+def _seed_pending_approval(
+    session_conn: sqlite3.Connection,
+    *,
+    subject: str = "business_brief",
+    stage: str = Stage.BOOTSTRAP.value,
+) -> str:
+    """Persist a pending subject-based approval (e.g. business_brief / mockup)."""
+    return store.persist_material(
+        session_conn,
+        direction=Direction.OUT.value,
+        stage=stage,
+        type=MaterialType.PENDING_QUESTION.value,
+        content={
+            "kind": "approval",
+            "subject": subject,
+            "details": {"name": "Maria's Pizzeria"},
+        },
+        pending=True,
+    )
+
+
+def test_force_continue_auto_approves_continuation_pending(orchestrator_setup):
+    """force_continue must auto-approve a pending continuation_approval.
+
+    Asserts:
+      - the pending row is resolved
+      - a user_approval material with auto_approved_via_resume=True exists
+      - a human_resumed event references the new approval material
+      - session is active with iter_since_approval=0
+      - report.auto_approved == 1
+    """
+    setup = orchestrator_setup
+    session_id = setup["session_id"]
+    # Pre-set the session to awaiting_human with a non-zero iter counter to
+    # mirror the real "stuck at the cap" state.
+    store.update_session_status(
+        setup["core_conn"],
+        session_id,
+        SessionStatus.AWAITING_HUMAN.value,
+        iter_since_approval=10,
+    )
+    with setup["session_conn_factory"]() as session_conn:
+        pending_mid = _seed_pending_continuation(session_conn)
+
+    with setup["session_conn_factory"]() as session_conn:
+        report = force_continue(
+            session_id,
+            core_conn=setup["core_conn"],
+            session_conn=session_conn,
+        )
+
+    assert report["auto_approved"] == 1
+    assert report["previous_status"] == SessionStatus.AWAITING_HUMAN.value
+    assert report["previous_iter"] == 10
+    assert pending_mid not in report["pending_remaining"]
+
+    with setup["session_conn_factory"]() as session_conn:
+        original = store.load_material(session_conn, pending_mid)
+        assert original is not None
+        assert original["pending"] is False
+
+        # A user_approval material with the auto-approve marker must exist.
+        approvals = session_conn.execute(
+            "SELECT id, content FROM material WHERE type = ?",
+            (MaterialType.USER_APPROVAL.value,),
+        ).fetchall()
+        import json as _json
+
+        decoded = [
+            (r["id"], _json.loads(r["content"])) for r in approvals
+        ]
+        matches = [
+            (mid, c)
+            for mid, c in decoded
+            if c.get("kind") == "continuation_approval"
+            and c.get("approved") is True
+            and c.get("auto_approved_via_resume") is True
+        ]
+        assert len(matches) == 1, f"expected one auto-approval, got {decoded}"
+        approval_mid = matches[0][0]
+
+        # A human_resumed event with the auto-approve marker references it.
+        events = store.load_events(session_conn)
+        hr = [e for e in events if e["type"] == EventType.HUMAN_RESUMED.value]
+        assert hr, "no human_resumed event appended"
+        latest = hr[-1]
+        assert latest["material_id"] == approval_mid
+        assert latest["payload"]["material_id"] == pending_mid
+        decision = latest["payload"]["answer_or_decision"]
+        assert decision.get("approved") is True
+        assert decision.get("auto_approved_via_resume") is True
+
+    session_row = store.load_session(setup["core_conn"], session_id)
+    assert session_row is not None
+    assert session_row["status"] == SessionStatus.ACTIVE.value
+    assert int(session_row["iter_since_approval"]) == 0
+
+
+def test_force_continue_leaves_ask_user_pending_alone(orchestrator_setup):
+    """force_continue must NOT auto-answer a freeform ask_user pending.
+
+    The pending row stays pending, no user_answer is written, status flips
+    to active, counter resets, and the report flags 0 auto-approvals.
+    """
+    setup = orchestrator_setup
+    session_id = setup["session_id"]
+    store.update_session_status(
+        setup["core_conn"],
+        session_id,
+        SessionStatus.AWAITING_HUMAN.value,
+        iter_since_approval=4,
+    )
+    with setup["session_conn_factory"]() as session_conn:
+        ask_mid = _seed_pending_ask_user(session_conn)
+
+    with setup["session_conn_factory"]() as session_conn:
+        report = force_continue(
+            session_id,
+            core_conn=setup["core_conn"],
+            session_conn=session_conn,
+        )
+
+    assert report["auto_approved"] == 0
+    assert report["previous_status"] == SessionStatus.AWAITING_HUMAN.value
+    assert report["previous_iter"] == 4
+    assert ask_mid in report["pending_remaining"]
+
+    with setup["session_conn_factory"]() as session_conn:
+        original = store.load_material(session_conn, ask_mid)
+        assert original is not None
+        assert original["pending"] is True
+
+        # No user_answer should have been written for the ask_user material.
+        answers = session_conn.execute(
+            "SELECT COUNT(*) AS n FROM material WHERE type = ?",
+            (MaterialType.USER_ANSWER.value,),
+        ).fetchone()
+        assert int(answers["n"]) == 0
+
+    session_row = store.load_session(setup["core_conn"], session_id)
+    assert session_row is not None
+    assert session_row["status"] == SessionStatus.ACTIVE.value
+    assert int(session_row["iter_since_approval"]) == 0
+
+
+def test_force_continue_leaves_subject_approval_pending_alone(orchestrator_setup):
+    """force_continue must NOT auto-approve a subject-based pending approval.
+
+    A pending kind='approval' with subject='business_brief' is a real content
+    gate; force_continue leaves it pending. Status flips to active, iter
+    resets, the report flags 0 auto-approvals.
+    """
+    setup = orchestrator_setup
+    session_id = setup["session_id"]
+    store.update_session_status(
+        setup["core_conn"],
+        session_id,
+        SessionStatus.AWAITING_HUMAN.value,
+        iter_since_approval=2,
+    )
+    with setup["session_conn_factory"]() as session_conn:
+        approval_mid = _seed_pending_approval(session_conn, subject="business_brief")
+
+    with setup["session_conn_factory"]() as session_conn:
+        report = force_continue(
+            session_id,
+            core_conn=setup["core_conn"],
+            session_conn=session_conn,
+        )
+
+    assert report["auto_approved"] == 0
+    assert approval_mid in report["pending_remaining"]
+
+    with setup["session_conn_factory"]() as session_conn:
+        original = store.load_material(session_conn, approval_mid)
+        assert original is not None
+        assert original["pending"] is True
+        # No user_approval row should have been written.
+        approvals = session_conn.execute(
+            "SELECT COUNT(*) AS n FROM material WHERE type = ?",
+            (MaterialType.USER_APPROVAL.value,),
+        ).fetchone()
+        assert int(approvals["n"]) == 0
+
+    session_row = store.load_session(setup["core_conn"], session_id)
+    assert session_row is not None
+    assert session_row["status"] == SessionStatus.ACTIVE.value
+    assert int(session_row["iter_since_approval"]) == 0
+
+
+def test_force_continue_idempotent_on_active_session(orchestrator_setup):
+    """force_continue on an active session with no pending materials is a no-op.
+
+    Status stays active, no new events or materials, report.auto_approved=0,
+    pending_remaining is empty.
+    """
+    setup = orchestrator_setup
+    session_id = setup["session_id"]
+    # Session is already active by default from create_session.
+    with setup["session_conn_factory"]() as session_conn:
+        events_before = store.load_events(session_conn)
+        materials_before = session_conn.execute(
+            "SELECT COUNT(*) AS n FROM material"
+        ).fetchone()["n"]
+
+    with setup["session_conn_factory"]() as session_conn:
+        report = force_continue(
+            session_id,
+            core_conn=setup["core_conn"],
+            session_conn=session_conn,
+        )
+
+    assert report["auto_approved"] == 0
+    assert report["previous_status"] == SessionStatus.ACTIVE.value
+    assert report["pending_remaining"] == []
+
+    with setup["session_conn_factory"]() as session_conn:
+        events_after = store.load_events(session_conn)
+        materials_after = session_conn.execute(
+            "SELECT COUNT(*) AS n FROM material"
+        ).fetchone()["n"]
+    # No new events appended (no continuation to approve), no new materials.
+    assert events_after == events_before
+    assert materials_after == materials_before
+
+    session_row = store.load_session(setup["core_conn"], session_id)
+    assert session_row is not None
+    assert session_row["status"] == SessionStatus.ACTIVE.value
+
+
+def test_force_continue_returns_correct_report(orchestrator_setup):
+    """Smoke-test the report dict's exact keys and types."""
+    setup = orchestrator_setup
+    session_id = setup["session_id"]
+    store.update_session_status(
+        setup["core_conn"],
+        session_id,
+        SessionStatus.AWAITING_HUMAN.value,
+        iter_since_approval=7,
+    )
+    with setup["session_conn_factory"]() as session_conn:
+        cont_mid = _seed_pending_continuation(session_conn)
+        ask_mid = _seed_pending_ask_user(session_conn)
+        approval_mid = _seed_pending_approval(session_conn, subject="mockup")
+
+    with setup["session_conn_factory"]() as session_conn:
+        report = force_continue(
+            session_id,
+            core_conn=setup["core_conn"],
+            session_conn=session_conn,
+        )
+
+    assert set(report.keys()) == {
+        "auto_approved",
+        "previous_status",
+        "previous_iter",
+        "pending_remaining",
+    }
+    assert isinstance(report["auto_approved"], int)
+    assert isinstance(report["previous_status"], str)
+    assert isinstance(report["previous_iter"], int)
+    assert isinstance(report["pending_remaining"], list)
+    assert all(isinstance(m, str) for m in report["pending_remaining"])
+
+    assert report["auto_approved"] == 1
+    assert report["previous_status"] == SessionStatus.AWAITING_HUMAN.value
+    assert report["previous_iter"] == 7
+    # The continuation_approval should be resolved, the ask_user and
+    # subject-based approval should still be pending.
+    assert cont_mid not in report["pending_remaining"]
+    assert ask_mid in report["pending_remaining"]
+    assert approval_mid in report["pending_remaining"]
 
 
 def test_tool_failed_alarm_never_auto_resolved(orchestrator_setup):

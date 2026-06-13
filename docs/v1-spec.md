@@ -362,6 +362,8 @@ State lives entirely in SQLite. `ask_user` and `request_approval` are surfaced a
 
 On resume after the user submits via `POST /sessions/{id}/answer`, the answer is written as `user_answer` / `user_approval` material and fed back to the worker **as the tool result in message history** — the worker just sees `ask_user(...) -> "answer"` in the next turn's `messages`. The orchestrator does not branch on whether the worker is real or mock.
 
+`POST /sessions/{id}/resume` carries explicit unstick semantics: if the session is `awaiting_human`, the route calls `orchestrator.force_continue(session_id, ...)` BEFORE invoking `run_until_pause`. `force_continue` auto-approves any pending `continuation_approval` materials (persisting a `user_approval` row with `auto_approved_via_resume: True`, appending a `human_resumed` event, marking the pending resolved), resets `iter_since_approval` to 0, and flips status back to `active` so the loop can run. Real content gates (`approval` on `business_brief`/`mockup`, freeform `ask_user`) are left pending — those still require an explicit `/answer`. The user's mental model: "/resume means continue past whatever safety cap is blocking me; real questions still need answers."
+
 ### Web UI (HITL surface)
 
 The session detail page is **chat-first**. Layout, top to bottom:

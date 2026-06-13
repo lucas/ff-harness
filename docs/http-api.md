@@ -173,6 +173,7 @@ Drive the orchestrator until it hits a pause, terminal state, or cap. Synchronou
 - **Query params:** none.
 - **Request body:** `{}` (empty object).
 - **Behavior:** calls `orchestrator.run_until_pause(session_id)`. The orchestrator loads session state, runs turns via the stage-mapped worker, dispatches tools, runs the post-hook chain after every `write_file`, evaluates checkpoints, persists events/materials/alarms, and exits cleanly when it hits any of: a `final` envelope, an `escalate` envelope, an `ask_user`/`request_approval` tool call, the 10-iteration human-approval gate, or the $1/day spend cap.
+- **Auto-unstick on `awaiting_human`:** if the session is already `awaiting_human` when the request arrives, the handler calls `orchestrator.force_continue(...)` BEFORE `run_until_pause`. That helper auto-approves any pending `continuation_approval` material (writes a `user_approval` row with `auto_approved_via_resume: true`, appends a `human_resumed` event, marks the pending resolved), resets `iter_since_approval` to 0, and flips status back to `active`. Real content gates — freeform `ask_user` pendings and subject-based `approval` pendings (e.g. `business_brief`, `mockup`) — are deliberately left pending; those still require an explicit `POST /sessions/{id}/answer`. The user's mental model is "/resume means continue past whatever safety cap is blocking me."
 - **Response body (200):**
   ```json
   {

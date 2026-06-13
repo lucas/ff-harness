@@ -113,6 +113,96 @@ def run_until_pause(session_id: str, config: OrchestratorConfig) -> RunResult:
         core_conn.close()
 
 
+def force_continue(
+    session_id: str,
+    *,
+    core_conn: sqlite3.Connection,
+    session_conn: sqlite3.Connection,
+) -> dict:
+    """Unstick a session that's stuck in awaiting_human.
+
+    Auto-approves any pending ``continuation_approval`` materials (writes a
+    ``user_approval`` material, marks the pending resolved, appends a
+    ``human_resumed`` event), resets ``iter_since_approval`` to 0, and flips
+    status to ``active``.
+
+    Does NOT auto-answer freeform ``ask_user`` or auto-approve subject-based
+    approvals (``business_brief``, ``mockup``) — those remain pending and
+    still require ``POST /sessions/{id}/answer``.
+
+    Returns a small report dict::
+
+        {
+            "auto_approved": int,        # count of continuation_approvals auto-approved
+            "previous_status": str,
+            "previous_iter": int,
+            "pending_remaining": list[str],  # material ids still pending after the call
+        }
+
+    Safe to call on a session that's already ``active`` (no-op except for
+    the pending continuation_approval auto-approve, which still runs in case
+    one exists — and which is recorded as an event for observability).
+    Raises ``ValueError`` if the session does not exist.
+    """
+    session = store.load_session(core_conn, session_id)
+    if session is None:
+        raise ValueError(f"session {session_id!r} not found in core DB")
+
+    previous_status = session["status"]
+    previous_iter = int(session["iter_since_approval"])
+    stage = session["current_stage"]
+
+    pending = store.load_pending_materials(session_conn)
+    auto_approved = 0
+    for material in pending:
+        content = material.get("content")
+        if not isinstance(content, dict):
+            continue
+        if content.get("kind") != "continuation_approval":
+            continue
+        approval_mid = store.persist_material(
+            session_conn,
+            direction=Direction.IN.value,
+            stage=stage,
+            type=MaterialType.USER_APPROVAL.value,
+            content={
+                "kind": "continuation_approval",
+                "approved": True,
+                "auto_approved_via_resume": True,
+            },
+        )
+        store.append_event(
+            session_conn,
+            type=EventType.HUMAN_RESUMED.value,
+            stage=stage,
+            payload={
+                "material_id": material["id"],
+                "answer_or_decision": {
+                    "approved": True,
+                    "auto_approved_via_resume": True,
+                },
+            },
+            material_id=approval_mid,
+        )
+        store.mark_material_resolved(session_conn, material["id"])
+        auto_approved += 1
+
+    store.update_session_status(
+        core_conn,
+        session_id,
+        SessionStatus.ACTIVE.value,
+        iter_since_approval=0,
+    )
+
+    remaining = store.load_pending_materials(session_conn)
+    return {
+        "auto_approved": auto_approved,
+        "previous_status": previous_status,
+        "previous_iter": previous_iter,
+        "pending_remaining": [m["id"] for m in remaining],
+    }
+
+
 def _run_loop(
     session_id: str,
     config: OrchestratorConfig,
@@ -907,6 +997,7 @@ __all__ = [
     "OrchestratorConfig",
     "RunResult",
     "run_until_pause",
+    "force_continue",
     "PAUSE_SPEND_CAP",
     "PAUSE_TURN_CAP",
     "PAUSE_AWAITING_HUMAN",

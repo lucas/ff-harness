@@ -482,6 +482,171 @@ def test_answer_continuation_approval_resets_iter_counter(
     assert int(session_row["iter_since_approval"]) == 0
 
 
+# ---------------------------------------------------------------------------
+# /resume unstick: force_continue auto-approves continuation_approval
+# ---------------------------------------------------------------------------
+
+
+def test_resume_unsticks_session_in_iter_cap(make_client, tmp_path: Path):
+    """Full HTTP path: trip the iter cap, then POST /resume (NOT /answer).
+
+    The /resume handler must:
+      - call force_continue, which auto-approves the pending
+        continuation_approval and resets the iter counter
+      - run the loop forward; the scripted MockWorker returns Final on the
+        next turn so the session terminates cleanly
+      - resolve the iteration_limit_reached alarm (state-based, condition no
+        longer holds because counter is now 0)
+      - mark the original continuation_approval pending row resolved
+    """
+    scripted: list[ToolCall | Final | Escalate] = [
+        Final(summary="unstuck via /resume"),
+    ]
+    client = make_client(scripted)
+    sid = client.post("/sessions", json={}).json()["session_id"]
+
+    # Force iter_since_approval to the cap so the first /resume trips it.
+    core_db = tmp_path / "data" / "harness.db"
+    conn = store.core_connection(core_db)
+    try:
+        store.update_session_status(
+            conn, sid, "active", iter_since_approval=10
+        )
+    finally:
+        conn.close()
+
+    # First /resume: trips iter cap, persists a continuation_approval, pauses.
+    r1 = client.post(f"/sessions/{sid}/resume", json={})
+    assert r1.status_code == 200
+    assert r1.json()["status"] == "awaiting_human"
+    assert r1.json()["paused_reason"] == "turn_cap"
+
+    detail = client.get(f"/sessions/{sid}").json()
+    pending = [
+        m for m in detail["pending_materials"]
+        if m["content"].get("kind") == "continuation_approval"
+    ]
+    assert len(pending) == 1
+    cont_mid = pending[0]["id"]
+
+    # Second /resume: must auto-approve the continuation (no /answer call) and
+    # drive the loop to the Final on the next turn.
+    r2 = client.post(f"/sessions/{sid}/resume", json={})
+    assert r2.status_code == 200, r2.text
+    body = r2.json()
+    assert body["status"] == "completed"
+    assert body["terminal"] is True
+
+    final = client.get(f"/sessions/{sid}").json()
+    # The continuation_approval pending row is now resolved.
+    cont_after = [
+        m for m in final["pending_materials"]
+        if m["id"] == cont_mid
+    ]
+    assert cont_after == []
+    # The iteration_limit_reached alarm auto-resolves once the counter is 0.
+    iter_alarms = [
+        a for a in final["alarms"] if a["type"] == "iteration_limit_reached"
+    ]
+    assert iter_alarms, "expected an iteration_limit_reached alarm to have fired"
+    assert all(a["resolved"] is True for a in iter_alarms)
+
+
+def test_resume_on_completed_session_is_noop(make_client, tmp_path: Path):
+    """POST /resume on a completed session must be a no-op.
+
+    Status stays 'completed', no events from force_continue (there are no
+    pending continuation_approvals to auto-approve, and the status check
+    leaves the completed session alone).
+    """
+    # Drive the session to completion first.
+    scripted: list[ToolCall | Final | Escalate] = [Final(summary="done.")]
+    client = make_client(scripted)
+    sid = client.post("/sessions", json={}).json()["session_id"]
+
+    r = client.post(f"/sessions/{sid}/resume", json={})
+    assert r.json()["status"] == "completed"
+
+    # Snapshot events + materials before the no-op /resume.
+    sessions_dir = tmp_path / "data" / "sessions"
+    db_path = sessions_dir / f"{sid}.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    events_before = conn.execute("SELECT COUNT(*) AS n FROM events").fetchone()["n"]
+    materials_before = conn.execute(
+        "SELECT COUNT(*) AS n FROM material"
+    ).fetchone()["n"]
+    conn.close()
+
+    # Second /resume — should be a no-op since the session is completed and
+    # has no pending continuation_approval to auto-approve.
+    r2 = client.post(f"/sessions/{sid}/resume", json={})
+    assert r2.status_code == 200
+    assert r2.json()["status"] == "completed"
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    events_after = conn.execute("SELECT COUNT(*) AS n FROM events").fetchone()["n"]
+    materials_after = conn.execute(
+        "SELECT COUNT(*) AS n FROM material"
+    ).fetchone()["n"]
+    conn.close()
+    assert events_after == events_before
+    assert materials_after == materials_before
+
+
+def test_resume_on_awaiting_human_with_ask_user_pending_does_not_auto_answer(
+    make_client,
+):
+    """POST /resume on an ask_user-paused session must NOT auto-answer.
+
+    The pending ask_user material stays pending, but force_continue still
+    flips the session status from awaiting_human back to active. The
+    orchestrator then runs the next turn; the MockWorker is scripted to
+    return Final so the session terminates cleanly and we can make crisp
+    assertions about the end state.
+
+    Documented behavior: the ask_user pending material remains pending
+    AFTER /resume so the operator still has the opportunity to /answer it
+    explicitly later if needed. Force_continue is purely a safety-gate
+    override, not an answer-skipper.
+    """
+    scripted: list[ToolCall | Final | Escalate] = [
+        ToolCall(tool="ask_user", args={"question": "what is your name?"}),
+        Final(summary="agent finished anyway"),
+    ]
+    client = make_client(scripted)
+    sid = client.post("/sessions", json={}).json()["session_id"]
+
+    # First /resume hits the ask_user pause.
+    r1 = client.post(f"/sessions/{sid}/resume", json={})
+    assert r1.json()["status"] == "awaiting_human"
+    assert r1.json()["paused_reason"] == "awaiting_human"
+
+    detail = client.get(f"/sessions/{sid}").json()
+    ask_pending = [
+        m for m in detail["pending_materials"]
+        if m["content"].get("kind") != "approval"
+        and m["content"].get("kind") != "continuation_approval"
+    ]
+    assert len(ask_pending) == 1
+    ask_mid = ask_pending[0]["id"]
+
+    # Second /resume — force_continue should NOT touch the ask_user pending.
+    # It flips status to active; the loop then runs the next scripted Final.
+    r2 = client.post(f"/sessions/{sid}/resume", json={})
+    assert r2.status_code == 200
+    body = r2.json()
+    assert body["status"] == "completed"
+    assert body["terminal"] is True
+
+    final = client.get(f"/sessions/{sid}").json()
+    # The ask_user material is STILL pending (force_continue did not answer it).
+    survived = [m for m in final["pending_materials"] if m["id"] == ask_mid]
+    assert len(survived) == 1
+    assert survived[0]["pending"] is True
+
+
 def test_400_on_answer_to_approval_without_approved(make_client):
     """Pending approval requires `approved` in the body; otherwise 400."""
     scripted: list[ToolCall | Final | Escalate] = [
