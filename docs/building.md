@@ -5,9 +5,9 @@ This file is the live state of the v1 build. It is self-sufficient: after `/clea
 ## Status snapshot
 
 - **Last updated:** 2026-06-13
-- **Current step:** Step 8 — LLMWorker × 2 + LLM client + 429 fallback (next up)
-- **Next step:** Step 9 — Domain bundle + FastAPI routes (Layer 3)
-- **Last green test:** `uv run pytest tests/` (187 passed — Steps 0-7 combined, MILESTONE met: all 4 pillars + Worker pillar demonstrated on MockWorker); `uv run pyright harness/ tests/` (0 errors).
+- **Current step:** Step 9 — Domain bundle + FastAPI routes (Layer 3) — next up
+- **Next step:** Step 10 — Jinja2 templates (Layer 4)
+- **Last green test:** `uv run pytest tests/ -m "not live"` (199 passed, 1 deselected — Steps 0-8 combined); `uv run pyright harness/ tests/` (0 errors).
 - **Active blockers:** none
 
 ## The 12-step checklist
@@ -38,7 +38,7 @@ Each row is one step from the Build Order in `/Users/elroy/.claude/plans/ignore-
 - [x] **Step 7 — Orchestrator (MockWorker E2E).** Status: done (2026-06-13). MILESTONE — all 4 pillars + Worker pillar demonstrable on MockWorker.
   - Gate: `uv run pytest tests/services/test_orchestrator_mock.py`
   - Done when: scripted 6-turn restaurant session drives every event type, writes every named checkpoint row, and all 4 alarms are raisable; crash-resume sub-test produces identical terminal state. **Major milestone — all four pillars + Worker pillar demonstrable on MockWorker.**
-- [ ] **Step 8 — LLMWorker × 2 + LLM client + 429 fallback.** Status: pending.
+- [x] **Step 8 — LLMWorker × 2 + LLM client + 429 fallback.** Status: done (2026-06-13).
   - Gate: `uv run pytest tests/services/test_llm_worker.py` (offline) and `-m live` for the two real-call assertions.
   - Done when: envelope-repair retry covered; 429→fallback success writes `is_fallback=1` and emits `model_swapped`; 429→both-fail raises `tool_failed`; no-fallback-configured raises `tool_failed`; live chat + code calls return valid envelopes under $0.05.
 - [ ] **Step 9 — Domain bundle + FastAPI routes.** Status: pending.

@@ -44,4 +44,4 @@ onboarding (`bootstrap` skill) → **Business Brief** (defaults baked in; inject
 - **Named alarms:** iteration_limit_reached, spend_cap_reached, tool_failed, checkpoint_failed_repeatedly, output_schema_violation, verification_failed, verifier_low_confidence, verifier_disagreement, max_subagent_depth_exceeded, subagent_failed, compaction_stalled, intent_mismatch.
 
 ## Next up
-Step 0 — Docs first (in progress). See `docs/building.md` for live status.
+See `docs/building.md` for the live status snapshot, current/next step, and 12-step checklist. That file is the source of truth for "where are we" — this section just points you there.
