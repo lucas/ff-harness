@@ -90,4 +90,33 @@ SESSION_DDL: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_events_material ON events(material_id)",
     "CREATE INDEX IF NOT EXISTS idx_events_checkpoint ON events(checkpoint_id)",
     "CREATE INDEX IF NOT EXISTS idx_events_alarm ON events(alarm_id)",
+    # llm_calls is created LAST so its FK targets (events, material) exist.
+    # It records every OpenRouter API attempt — full request messages, full
+    # response text, tokens, cost, and FK links to the worker_input event /
+    # material the call serviced. Lives in the per-session DB (not the core
+    # DB) because SQLite forbids cross-DB FKs. Distinct from `spend_log`
+    # which lives in the core DB and powers the cross-session $1/day cap.
+    """
+    CREATE TABLE IF NOT EXISTS llm_calls (
+      id                  TEXT PRIMARY KEY,
+      ts                  TEXT NOT NULL,
+      model               TEXT NOT NULL,
+      is_fallback         INTEGER NOT NULL DEFAULT 0,
+      request_messages    TEXT NOT NULL,
+      request_options     TEXT,
+      response_text       TEXT,
+      finish_reason       TEXT,
+      tokens_in           INTEGER NOT NULL DEFAULT 0,
+      tokens_out          INTEGER NOT NULL DEFAULT 0,
+      cost_usd            REAL NOT NULL DEFAULT 0,
+      status              TEXT NOT NULL,
+      error_message       TEXT,
+      related_event_id    TEXT NULL REFERENCES events(id),
+      related_material_id TEXT NULL REFERENCES material(id),
+      created_at          TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_llm_calls_ts ON llm_calls(ts)",
+    "CREATE INDEX IF NOT EXISTS idx_llm_calls_event ON llm_calls(related_event_id)",
+    "CREATE INDEX IF NOT EXISTS idx_llm_calls_model ON llm_calls(model)",
 ]

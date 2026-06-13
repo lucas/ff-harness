@@ -382,6 +382,30 @@
       border-color: var(--fg-faint);
     }
 
+    /* LLM call detail expander — keep the request/response payload bounded
+       so a long prompt doesn't push the rest of the page off-screen. */
+    .llm-call-detail summary { font-size: 12px; }
+    .llm-call-body {
+      margin-top: 6px;
+      padding: 6px 8px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+    }
+    .llm-call-body h4 {
+      margin: 6px 0 2px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--fg-muted);
+    }
+    .llm-call-body h4:first-child { margin-top: 0; }
+    .llm-call-body pre {
+      max-height: 240px;
+      overflow: auto;
+      margin: 0;
+    }
+
     /* Chat divider — used for `rewound` audit entries so they appear inline
        in the chat as a centered horizontal-rule label rather than as a
        user/agent bubble. */

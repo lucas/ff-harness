@@ -649,3 +649,155 @@ def _decode_alarm(row: sqlite3.Row) -> dict:
     d["context"] = json.loads(d["context"])
     d["resolved"] = bool(d["resolved"])
     return d
+
+
+# ---------------------------------------------------------------------------
+# LLM calls (per-session DB) — full request/response audit log
+# ---------------------------------------------------------------------------
+#
+# Relationship to `spend_log` (core DB):
+#   - spend_log is the lightweight cross-session rolling-cap ledger; the
+#     `recent_spend_today_usd` query runs every turn, so it stays lean.
+#   - llm_calls is the per-call detail log: full request messages, full
+#     response text, FK links to the per-session `events` / `material` rows.
+#     Volume / payload size makes it a per-session-DB concern.
+#   - Both rows are written on every successful API attempt. We deliberately
+#     do NOT try to merge them.
+
+_LLM_CALL_STATUSES: frozenset[str] = frozenset(
+    {"ok", "rate_limited", "transport_error", "parse_error", "repair_retry"}
+)
+
+
+def record_llm_call(
+    session_conn: sqlite3.Connection,
+    *,
+    model: str,
+    is_fallback: bool,
+    request_messages: list[dict],
+    request_options: dict | None,
+    response_text: str | None,
+    finish_reason: str | None,
+    tokens_in: int,
+    tokens_out: int,
+    cost_usd: float,
+    status: str,
+    error_message: str | None = None,
+    related_event_id: str | None = None,
+    related_material_id: str | None = None,
+    ts: datetime | str | None = None,
+) -> str:
+    """Persist one LLM call attempt to the per-session ``llm_calls`` table.
+
+    JSON-encodes ``request_messages`` and ``request_options``. Validates
+    ``status`` against the closed set ``{ok, rate_limited, transport_error,
+    parse_error, repair_retry}`` so a typo can't quietly land in the table.
+    Returns the new row's id.
+    """
+    if status not in _LLM_CALL_STATUSES:
+        raise ValueError(
+            f"invalid llm_calls status {status!r};"
+            f" expected one of {sorted(_LLM_CALL_STATUSES)}"
+        )
+    call_id = new_id()
+    now = _resolve_ts(ts)
+    session_conn.execute(
+        "INSERT INTO llm_calls ("
+        " id, ts, model, is_fallback, request_messages, request_options,"
+        " response_text, finish_reason, tokens_in, tokens_out, cost_usd,"
+        " status, error_message, related_event_id, related_material_id,"
+        " created_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            call_id,
+            now,
+            model,
+            1 if is_fallback else 0,
+            json.dumps(request_messages),
+            json.dumps(request_options) if request_options is not None else None,
+            response_text,
+            finish_reason,
+            int(tokens_in),
+            int(tokens_out),
+            float(cost_usd),
+            status,
+            error_message,
+            related_event_id,
+            related_material_id,
+            now,
+        ),
+    )
+    session_conn.commit()
+    return call_id
+
+
+def load_llm_calls(
+    session_conn: sqlite3.Connection,
+    *,
+    limit: int | None = None,
+    since_id: str | None = None,
+) -> list[dict]:
+    """Return llm_calls rows ordered by id ASC (chronological, UUID7).
+
+    Decodes ``request_messages`` / ``request_options`` JSON back to Python
+    objects so callers get usable structures. When ``limit`` is provided,
+    returns the most recent N rows (still in chronological order — the
+    template renders newest at the bottom to match the chat panel).
+    """
+    if since_id is not None:
+        rows = session_conn.execute(
+            "SELECT id, ts, model, is_fallback, request_messages, request_options,"
+            " response_text, finish_reason, tokens_in, tokens_out, cost_usd,"
+            " status, error_message, related_event_id, related_material_id,"
+            " created_at FROM llm_calls WHERE id > ? ORDER BY id ASC",
+            (since_id,),
+        ).fetchall()
+    elif limit is not None:
+        # "Most recent N, chronological": fetch N by DESC then reverse.
+        rows_desc = session_conn.execute(
+            "SELECT id, ts, model, is_fallback, request_messages, request_options,"
+            " response_text, finish_reason, tokens_in, tokens_out, cost_usd,"
+            " status, error_message, related_event_id, related_material_id,"
+            " created_at FROM llm_calls ORDER BY id DESC LIMIT ?",
+            (int(limit),),
+        ).fetchall()
+        rows = list(reversed(rows_desc))
+    else:
+        rows = session_conn.execute(
+            "SELECT id, ts, model, is_fallback, request_messages, request_options,"
+            " response_text, finish_reason, tokens_in, tokens_out, cost_usd,"
+            " status, error_message, related_event_id, related_material_id,"
+            " created_at FROM llm_calls ORDER BY id ASC"
+        ).fetchall()
+    return [_decode_llm_call(r) for r in rows]
+
+
+def _decode_llm_call(row: sqlite3.Row) -> dict:
+    d = dict(row)
+    d["is_fallback"] = bool(d["is_fallback"])
+    raw_messages = d.get("request_messages")
+    d["request_messages"] = (
+        json.loads(raw_messages) if isinstance(raw_messages, str) else []
+    )
+    raw_options = d.get("request_options")
+    d["request_options"] = (
+        json.loads(raw_options) if isinstance(raw_options, str) else None
+    )
+    return d
+
+
+def latest_worker_input_event_id(
+    session_conn: sqlite3.Connection,
+) -> str | None:
+    """Return the most recent ``worker_input`` event id, or None.
+
+    Used by LLMWorker to link each ``llm_calls`` row to the turn-triggering
+    event so the UI can group calls by turn. UUID7 ordering = chronological.
+    """
+    row = session_conn.execute(
+        "SELECT id FROM events WHERE type = 'worker_input'"
+        " ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return None
+    return str(row["id"])

@@ -197,9 +197,41 @@ CREATE TABLE events (
 CREATE INDEX idx_events_material   ON events(material_id);
 CREATE INDEX idx_events_checkpoint ON events(checkpoint_id);
 CREATE INDEX idx_events_alarm      ON events(alarm_id);
+
+-- Per-call LLM audit log. MUST be created AFTER events + material so the
+-- FK targets exist. Uses CREATE TABLE IF NOT EXISTS so existing session
+-- DBs gain the table on next open.
+CREATE TABLE llm_calls (
+  id                  TEXT PRIMARY KEY,                                    -- UUID7
+  ts                  TEXT NOT NULL,
+  model               TEXT NOT NULL,
+  is_fallback         INTEGER NOT NULL DEFAULT 0,
+  request_messages    TEXT NOT NULL,                                       -- JSON list[{role, content, tool_call_id?}]
+  request_options     TEXT,                                                -- JSON: response_format, temperature
+  response_text       TEXT,                                                -- null on 429/transport_error
+  finish_reason       TEXT,
+  tokens_in           INTEGER NOT NULL DEFAULT 0,
+  tokens_out          INTEGER NOT NULL DEFAULT 0,
+  cost_usd            REAL NOT NULL DEFAULT 0,
+  status              TEXT NOT NULL,                                       -- ok|rate_limited|transport_error|repair_retry|parse_error
+  error_message       TEXT,
+  related_event_id    TEXT NULL REFERENCES events(id),                     -- worker_input event this call serviced
+  related_material_id TEXT NULL REFERENCES material(id),                   -- reserved for future tool-driven LLM calls
+  created_at          TEXT NOT NULL
+);
+CREATE INDEX idx_llm_calls_ts    ON llm_calls(ts);
+CREATE INDEX idx_llm_calls_event ON llm_calls(related_event_id);
+CREATE INDEX idx_llm_calls_model ON llm_calls(model);
 ```
 
 Every event row optionally points to the material, checkpoint, or alarm it concerns (zero or one of the three — never multiple). Joining `events` to any of the three tables produces a queryable trace. `alarms.triggered_by_event_id` is set after the alarm-raising event is appended.
+
+`llm_calls` is the per-call audit log (full request messages, full response text, FK to the triggering `worker_input` event). It lives in the per-session DB because SQLite forbids cross-DB FKs and the payload size doesn't suit the lean core-DB `spend_log` table. Both tables record overlapping numbers (model, tokens, cost) but serve different consumers:
+
+- **`spend_log` (core DB)** — lightweight cross-session ledger used by the $1/day rolling cap query (`recent_spend_today_usd`); kept tiny because the query runs on every turn.
+- **`llm_calls` (per-session DB)** — full-payload detail log for the session detail UI; one row per API attempt (success OR failure). Status values: `ok` (2xx + parsed), `rate_limited` (429), `transport_error` (5xx / timeout), `repair_retry` (HTTP success but envelope parse failed; a follow-up call will retry — both rows are recorded), `parse_error` (terminal parse failure after repair retry exhausted).
+
+Both tables are written on every successful API attempt; do not try to merge them.
 
 ## 5. Pydantic envelope (`harness/models/envelope.py`)
 

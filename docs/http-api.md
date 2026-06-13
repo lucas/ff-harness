@@ -152,10 +152,33 @@ Full session detail: the session row plus every log surface needed to render the
         "qwen/qwen3-coder:free": 0.0
       },
       "fallback_count": 2
-    }
+    },
+    "llm_calls": [
+      {
+        "id": "0190a8d4-9b1e-7000-8000-000000000010",
+        "ts": "2026-06-13T14:00:02Z",
+        "model": "deepseek/deepseek-v4-flash:free",
+        "is_fallback": false,
+        "request_messages": [
+          {"role": "system", "content": "you are a..."},
+          {"role": "user", "content": "Make me a homepage."}
+        ],
+        "request_options": {"response_format": {"type": "json_object"}, "temperature": 0.2},
+        "response_text": "{\"type\":\"tool_call\",\"tool\":\"ask_user\",\"args\":{\"question\":\"What is your business name?\"}}",
+        "finish_reason": null,
+        "tokens_in": 412,
+        "tokens_out": 38,
+        "cost_usd": 0.0,
+        "status": "ok",
+        "error_message": null,
+        "related_event_id": "0190a8d4-9b1d-7000-8000-000000000001",
+        "related_material_id": null,
+        "created_at": "2026-06-13T14:00:02Z"
+      }
+    ]
   }
   ```
-- **Notes on shape:** `events` is ordered ascending by `id`. `checkpoints` and `alarms` are ordered ascending by `created_at`. `pending_materials` includes only rows with `pending=1` and is the input list for the awaiting-human form. `spend_summary` is computed by `store.spend_summary_for_session(session_id)` — `total_usd` sums all `cost_usd`, `by_model` groups by exact model string, `fallback_count` counts rows where `is_fallback=1`.
+- **Notes on shape:** `events` is ordered ascending by `id`. `checkpoints` and `alarms` are ordered ascending by `created_at`. `pending_materials` includes only rows with `pending=1` and is the input list for the awaiting-human form. `spend_summary` is computed by `store.spend_summary_for_session(session_id)` — `total_usd` sums all `cost_usd`, `by_model` groups by exact model string, `fallback_count` counts rows where `is_fallback=1`. `llm_calls` is the most recent 50 LLM API attempts in chronological (id ASC) order; `request_messages` and `request_options` are parsed JSON objects, not nested strings. `status` is one of `ok | rate_limited | transport_error | repair_retry | parse_error`. Both `spend_summary` (rolled up from core-DB `spend_log`) and `llm_calls` (per-session full payloads) are written on every successful API attempt; the two are intentionally separate (lean cross-session ledger vs. full audit log).
 - **Status codes:**
   - `200` — session found.
   - `404` — no session with that id; `error="not_found"`.

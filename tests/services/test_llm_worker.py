@@ -168,6 +168,10 @@ def _load_spend_rows(core_conn: sqlite3.Connection) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def _load_llm_call_rows(session_conn: sqlite3.Connection) -> list[dict]:
+    return store.load_llm_calls(session_conn)
+
+
 def _model_swapped_events(session_conn: sqlite3.Connection) -> list[dict]:
     return [
         e
@@ -530,6 +534,201 @@ def test_llmworker_implements_worker_protocol(tmp_path: Path) -> None:
         as_worker: Worker = worker
         result = as_worker.act(_make_ctx("sid"))
         assert isinstance(result, (ToolCall, Final, Escalate))
+    finally:
+        session_conn.close()
+        core_conn.close()
+
+
+# ---------------------------------------------------------------------------
+# 7. llm_calls audit log — per-attempt request/response persistence
+# ---------------------------------------------------------------------------
+
+
+def test_act_records_one_call_on_happy_path(tmp_path: Path) -> None:
+    """A successful primary call writes one ok-status llm_calls row."""
+    stub = StubLLMClient([_chat_response(_valid_toolcall_json(), cost=0.0042)])
+    worker, core_conn, session_conn, _ = _build_worker(
+        tmp_path=tmp_path, stub=stub
+    )
+    try:
+        result = worker.act(_make_ctx("sid"))
+        assert isinstance(result, ToolCall)
+
+        rows = _load_llm_call_rows(session_conn)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["status"] == "ok"
+        assert row["model"] == _PRIMARY
+        assert row["is_fallback"] is False
+        # Full request messages are stored.
+        assert row["request_messages"] == [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "hello"},
+        ]
+        # response_text matches the stub.
+        assert row["response_text"] == _valid_toolcall_json()
+        # Token and cost columns mirror the ChatResponse.
+        assert row["tokens_in"] == 10
+        assert row["tokens_out"] == 20
+        assert row["cost_usd"] == pytest.approx(0.0042)
+        assert row["error_message"] is None
+        # request_options carries the JSON-mode response_format the worker sent.
+        opts = row["request_options"]
+        assert isinstance(opts, dict)
+        assert opts["response_format"] == {"type": "json_object"}
+    finally:
+        session_conn.close()
+        core_conn.close()
+
+
+def test_act_records_two_calls_on_repair_retry_success(tmp_path: Path) -> None:
+    """Bad JSON then good JSON: two rows. First repair_retry, second ok."""
+    stub = StubLLMClient(
+        [
+            _chat_response("not json"),
+            _chat_response(_valid_toolcall_json()),
+        ]
+    )
+    worker, core_conn, session_conn, _ = _build_worker(
+        tmp_path=tmp_path, stub=stub
+    )
+    try:
+        result = worker.act(_make_ctx("sid"))
+        assert isinstance(result, ToolCall)
+
+        rows = _load_llm_call_rows(session_conn)
+        assert len(rows) == 2
+        # Chronological: first attempt was re-tagged repair_retry; second is ok.
+        assert rows[0]["status"] == "repair_retry"
+        assert rows[0]["response_text"] == "not json"
+        assert rows[1]["status"] == "ok"
+        assert rows[1]["response_text"] == _valid_toolcall_json()
+        # Both share the same primary model (no swap happened).
+        assert rows[0]["model"] == _PRIMARY
+        assert rows[1]["model"] == _PRIMARY
+    finally:
+        session_conn.close()
+        core_conn.close()
+
+
+def test_act_records_parse_error_after_repair_exhausted(tmp_path: Path) -> None:
+    """Two bad responses: first row is repair_retry, second is parse_error."""
+    stub = StubLLMClient(
+        [
+            _chat_response("not json"),
+            _chat_response("still not json"),
+        ]
+    )
+    worker, core_conn, session_conn, _ = _build_worker(
+        tmp_path=tmp_path, stub=stub
+    )
+    try:
+        result = worker.act(_make_ctx("sid"))
+        assert isinstance(result, Escalate)
+
+        rows = _load_llm_call_rows(session_conn)
+        assert len(rows) == 2
+        assert rows[0]["status"] == "repair_retry"
+        assert rows[1]["status"] == "parse_error"
+        # The parse_error row's error_message describes the parse failure.
+        assert rows[1]["error_message"] is not None
+        assert rows[1]["response_text"] == "still not json"
+    finally:
+        session_conn.close()
+        core_conn.close()
+
+
+def test_act_records_429_then_fallback_success(tmp_path: Path) -> None:
+    """429 + fallback ok: two rows, status rate_limited then ok (fallback=1)."""
+    stub = StubLLMClient(
+        [
+            RateLimited(_PRIMARY),
+            _chat_response(_valid_toolcall_json()),
+        ]
+    )
+    worker, core_conn, session_conn, _ = _build_worker(
+        tmp_path=tmp_path, stub=stub
+    )
+    try:
+        # Pre-seed a worker_input event so we can assert related_event_id linking.
+        eid = store.append_event(
+            session_conn, "worker_input", "bootstrap",
+            {"messages_count": 2, "tokens_estimate": 100},
+        )
+        result = worker.act(_make_ctx("sid"))
+        assert isinstance(result, ToolCall)
+
+        rows = _load_llm_call_rows(session_conn)
+        assert len(rows) == 2
+        # First row: rate_limited on the primary, no fallback flag, zero usage.
+        assert rows[0]["status"] == "rate_limited"
+        assert rows[0]["model"] == _PRIMARY
+        assert rows[0]["is_fallback"] is False
+        assert rows[0]["response_text"] is None
+        assert rows[0]["tokens_in"] == 0
+        assert rows[0]["tokens_out"] == 0
+        assert rows[0]["cost_usd"] == 0.0
+        assert rows[0]["error_message"] is not None
+        # Second row: ok on the fallback.
+        assert rows[1]["status"] == "ok"
+        assert rows[1]["model"] == _FALLBACK
+        assert rows[1]["is_fallback"] is True
+        assert rows[1]["response_text"] == _valid_toolcall_json()
+        # Both calls link back to the same worker_input event.
+        assert rows[0]["related_event_id"] == eid
+        assert rows[1]["related_event_id"] == eid
+    finally:
+        session_conn.close()
+        core_conn.close()
+
+
+def test_act_records_transport_error(tmp_path: Path) -> None:
+    """Transport failure produces one transport_error row, no spend."""
+    stub = StubLLMClient([LLMTransportError("connection reset")])
+    worker, core_conn, session_conn, _ = _build_worker(
+        tmp_path=tmp_path, stub=stub
+    )
+    try:
+        result = worker.act(_make_ctx("sid"))
+        assert isinstance(result, Escalate)
+
+        rows = _load_llm_call_rows(session_conn)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["status"] == "transport_error"
+        assert row["model"] == _PRIMARY
+        assert row["response_text"] is None
+        assert row["tokens_in"] == 0
+        assert row["tokens_out"] == 0
+        assert row["cost_usd"] == 0.0
+        assert row["error_message"] is not None
+        assert "connection reset" in row["error_message"]
+        # And spend_log stays empty (no row for failed calls).
+        assert _load_spend_rows(core_conn) == []
+    finally:
+        session_conn.close()
+        core_conn.close()
+
+
+def test_spend_log_and_llm_calls_both_written_on_success(tmp_path: Path) -> None:
+    """Both audit paths stay in sync: one llm_calls row + one spend_log row."""
+    stub = StubLLMClient([_chat_response(_valid_final_json(), cost=0.0123)])
+    worker, core_conn, session_conn, _ = _build_worker(
+        tmp_path=tmp_path, stub=stub
+    )
+    try:
+        worker.act(_make_ctx("sid"))
+        spend = _load_spend_rows(core_conn)
+        calls = _load_llm_call_rows(session_conn)
+        assert len(spend) == 1
+        assert len(calls) == 1
+        # Overlapping numbers match.
+        assert spend[0]["model"] == calls[0]["model"]
+        assert spend[0]["tokens_in"] == calls[0]["tokens_in"]
+        assert spend[0]["tokens_out"] == calls[0]["tokens_out"]
+        assert float(spend[0]["cost_usd"]) == pytest.approx(
+            float(calls[0]["cost_usd"])
+        )
     finally:
         session_conn.close()
         core_conn.close()

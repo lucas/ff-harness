@@ -29,6 +29,7 @@ from fastapi.testclient import TestClient
 from harness.api.app import create_app
 from harness.api.dependencies import AppContext
 from harness.models.envelope import Escalate, Final, ToolCall
+from harness.services import store
 from harness.services.llm import OpenRouterClient
 from harness.services.worker import MockWorker, Worker
 
@@ -756,6 +757,57 @@ def test_events_table_has_rewind_button_on_awaiting_human_rows(make_test_app):
 # ---------------------------------------------------------------------------
 # 20. After POST /rewind, the chat log renders a `rewound` divider
 # ---------------------------------------------------------------------------
+
+
+def test_session_view_renders_llm_calls_section(make_test_app):
+    """The Details accordion includes an LLM calls section.
+
+    On a freshly created session with no LLM calls, the empty-state copy
+    ("No LLM calls yet.") must render. After seeding one llm_calls row
+    directly via the store, the table row renders with the model + status.
+    """
+    client, data_dir = make_test_app()
+    sid = _create_session(client)
+
+    r = client.get(f"/sessions/{sid}/view")
+    assert r.status_code == 200
+    body = r.text
+    # Empty-state path.
+    assert "LLM calls" in body
+    assert "No LLM calls yet." in body
+
+    # Now seed one row directly and re-fetch.
+    sessions_dir = data_dir / "sessions"
+    conn = store.session_connection(sessions_dir, sid)
+    try:
+        store.record_llm_call(
+            conn,
+            model="qwen/qwen3-coder:free",
+            is_fallback=False,
+            request_messages=[
+                {"role": "user", "content": "build a homepage"},
+            ],
+            request_options=None,
+            response_text='{"type":"final","summary":"ok"}',
+            finish_reason=None,
+            tokens_in=4,
+            tokens_out=9,
+            cost_usd=0.0,
+            status="ok",
+        )
+    finally:
+        conn.close()
+
+    r = client.get(f"/sessions/{sid}/view")
+    assert r.status_code == 200
+    body = r.text
+    # The section header reflects the new count.
+    assert "LLM calls (1)" in body
+    # Model id (or its tail) and status appear in the table row.
+    assert "qwen3-coder" in body
+    assert ">ok<" in body
+    # The expandable detail "View" summary is present.
+    assert "<summary>View</summary>" in body
 
 
 def test_rewound_divider_renders_in_chat(make_test_app):

@@ -198,6 +198,47 @@
     {% endif %}
   </div>
 
+  {# ---- LLM calls ---- #}
+  <div class="card" id="llm-calls-card">
+    <h2>LLM calls ({{ llm_calls|length }})</h2>
+    {% if llm_calls %}
+      <table class="events-table">
+        <thead><tr><th>Time</th><th>Model</th><th>Status</th><th>Tokens</th><th>Cost</th><th></th></tr></thead>
+        <tbody>
+          {% for call in llm_calls %}
+            <tr>
+              <td class="muted" style="white-space:nowrap;font-variant-numeric:tabular-nums;">{{ call.ts_short }}</td>
+              <td>
+                <code>{{ call.model_short }}</code>
+                {% if call.is_fallback %}<span class="badge swapped">fallback</span>{% endif %}
+              </td>
+              <td><span class="badge {{ call.status_class }}">{{ call.status }}</span></td>
+              <td>{{ call.tokens_in }} &rarr; {{ call.tokens_out }}</td>
+              <td>${{ '%.4f' | format(call.cost_usd) }}</td>
+              <td>
+                <details class="llm-call-detail">
+                  <summary>View</summary>
+                  <div class="llm-call-body">
+                    <h4>Request</h4>
+                    <pre>{{ call.request_messages_pretty }}</pre>
+                    <h4>Response</h4>
+                    <pre>{{ call.response_text or '(no response)' }}</pre>
+                    {% if call.error_message %}
+                      <h4>Error</h4>
+                      <pre>{{ call.error_message }}</pre>
+                    {% endif %}
+                  </div>
+                </details>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <div class="empty">No LLM calls yet.</div>
+    {% endif %}
+  </div>
+
   {# ---- Site preview (conditional) ---- #}
   {% if has_site_files %}
     <div class="card" id="site-preview-card">

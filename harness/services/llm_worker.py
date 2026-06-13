@@ -97,12 +97,17 @@ class LLMWorker:
             # the signal for "transport-level give-up: escalate."
             return Escalate(reason="rate limited" if self._last_failure_kind == "rate_limited" else "transport error")
 
-        chat_response, model_used, is_fallback = first_chat
+        chat_response, model_used, is_fallback, first_call_id = first_chat
 
         # Try to parse the envelope. On failure, attempt a single repair retry.
         parse_result = _try_parse(chat_response.text)
         if isinstance(parse_result, _ParseOk):
             return parse_result.envelope
+
+        # The first call's API attempt succeeded transport-wise but failed
+        # envelope parse. Re-tag its llm_calls row as `repair_retry` so the
+        # audit trail records "this call triggered the repair attempt."
+        self._retag_llm_call(first_call_id, "repair_retry")
 
         # Schema repair retry. Reuses whichever model just answered (fallback
         # if we already swapped, else primary). That way a swap that succeeds
@@ -127,16 +132,24 @@ class LLMWorker:
                 )
             )
 
-        repair_parse = _try_parse(repair_chat.text)
+        repair_response, _repair_call_id = repair_chat
+        repair_parse = _try_parse(repair_response.text)
         if isinstance(repair_parse, _ParseOk):
             return repair_parse.envelope
 
         # Two parse failures in a row — raise the schema alarm and escalate.
+        # Re-tag the second attempt as `parse_error` so the llm_calls log
+        # shows a terminal-parse outcome rather than a generic `ok`.
+        self._retag_llm_call(
+            _repair_call_id,
+            "parse_error",
+            error_message=repair_parse.error,
+        )
         alarms.raise_output_schema_violation(
             self._session_conn,
             parse_error=repair_parse.error,
             repair_attempt=1,
-            raw_text_preview=repair_chat.text[:_RAW_PREVIEW_MAX],
+            raw_text_preview=repair_response.text[:_RAW_PREVIEW_MAX],
             stage=ctx.stage,
         )
         return Escalate(reason="schema")
@@ -152,12 +165,15 @@ class LLMWorker:
         *,
         messages: list[dict],
         ctx: WorkerContext,
-    ) -> tuple[ChatResponse, str, bool] | None:
+    ) -> tuple[ChatResponse, str, bool, str] | None:
         """Issue the primary call; on 429, attempt the fallback once.
 
-        Returns (chat_response, model_used, is_fallback) on success or None
-        when both attempts fail. Failure side-effects (alarms, events) are
-        emitted here so callers can stay flat.
+        Returns (chat_response, model_used, is_fallback, llm_call_id) on
+        success or None when both attempts fail. Failure side-effects
+        (alarms, events) are emitted here so callers can stay flat. Every
+        API attempt (success OR failure) writes one ``llm_calls`` row; the
+        returned id is the row for the SUCCESSFUL call so the act() loop
+        can re-tag it later (e.g. ``repair_retry`` when parse fails).
         """
         try:
             chat_response = self._client.chat(
@@ -165,9 +181,24 @@ class LLMWorker:
                 messages=messages,
                 response_format=_RESPONSE_FORMAT_JSON,
             )
-        except RateLimited:
+        except RateLimited as exc:
+            # Record the 429 attempt before the swap branch runs.
+            self._record_llm_call_failure(
+                messages=messages,
+                model=self._primary,
+                is_fallback=False,
+                status="rate_limited",
+                error_message=str(exc),
+            )
             return self._swap_to_fallback(messages=messages, ctx=ctx)
         except LLMTransportError as exc:
+            self._record_llm_call_failure(
+                messages=messages,
+                model=self._primary,
+                is_fallback=False,
+                status="transport_error",
+                error_message=str(exc),
+            )
             self._last_failure_kind = "transport"
             alarms.raise_tool_failed(
                 self._session_conn,
@@ -180,15 +211,21 @@ class LLMWorker:
             return None
 
         self._log_spend(chat_response, model=self._primary, is_fallback=False)
+        call_id = self._record_llm_call_success(
+            messages=messages,
+            response=chat_response,
+            model=self._primary,
+            is_fallback=False,
+        )
         self._last_failure_kind = "ok"
-        return chat_response, self._primary, False
+        return chat_response, self._primary, False, call_id
 
     def _swap_to_fallback(
         self,
         *,
         messages: list[dict],
         ctx: WorkerContext,
-    ) -> tuple[ChatResponse, str, bool] | None:
+    ) -> tuple[ChatResponse, str, bool, str] | None:
         """Handle the primary-429 branch: emit model_swapped + retry fallback."""
         if self._fallback is None:
             self._last_failure_kind = "rate_limited"
@@ -224,7 +261,14 @@ class LLMWorker:
                 messages=messages,
                 response_format=_RESPONSE_FORMAT_JSON,
             )
-        except RateLimited:
+        except RateLimited as exc:
+            self._record_llm_call_failure(
+                messages=messages,
+                model=self._fallback,
+                is_fallback=True,
+                status="rate_limited",
+                error_message=str(exc),
+            )
             self._last_failure_kind = "rate_limited"
             alarms.raise_tool_failed(
                 self._session_conn,
@@ -239,6 +283,13 @@ class LLMWorker:
             )
             return None
         except LLMTransportError as exc:
+            self._record_llm_call_failure(
+                messages=messages,
+                model=self._fallback,
+                is_fallback=True,
+                status="transport_error",
+                error_message=str(exc),
+            )
             self._last_failure_kind = "transport"
             alarms.raise_tool_failed(
                 self._session_conn,
@@ -251,8 +302,14 @@ class LLMWorker:
             return None
 
         self._log_spend(chat_response, model=self._fallback, is_fallback=True)
+        call_id = self._record_llm_call_success(
+            messages=messages,
+            response=chat_response,
+            model=self._fallback,
+            is_fallback=True,
+        )
         self._last_failure_kind = "ok"
-        return chat_response, self._fallback, True
+        return chat_response, self._fallback, True, call_id
 
     def _call_one(
         self,
@@ -261,8 +318,11 @@ class LLMWorker:
         messages: list[dict],
         is_fallback: bool,
         ctx: WorkerContext,
-    ) -> ChatResponse | None:
+    ) -> tuple[ChatResponse, str] | None:
         """Single shot at a specific model — used by the repair retry.
+
+        Returns ``(response, llm_call_id)`` on transport-success so the
+        caller can re-tag the row's status when envelope parsing fails.
 
         No swap logic here: if the repair call itself 429s or fails
         transport-side, we raise the appropriate alarm and bail. We do NOT
@@ -276,7 +336,14 @@ class LLMWorker:
                 messages=messages,
                 response_format=_RESPONSE_FORMAT_JSON,
             )
-        except RateLimited:
+        except RateLimited as exc:
+            self._record_llm_call_failure(
+                messages=messages,
+                model=model,
+                is_fallback=is_fallback,
+                status="rate_limited",
+                error_message=str(exc),
+            )
             self._last_failure_kind = "rate_limited"
             alarms.raise_tool_failed(
                 self._session_conn,
@@ -290,6 +357,13 @@ class LLMWorker:
             )
             return None
         except LLMTransportError as exc:
+            self._record_llm_call_failure(
+                messages=messages,
+                model=model,
+                is_fallback=is_fallback,
+                status="transport_error",
+                error_message=str(exc),
+            )
             self._last_failure_kind = "transport"
             alarms.raise_tool_failed(
                 self._session_conn,
@@ -302,8 +376,14 @@ class LLMWorker:
             return None
 
         self._log_spend(chat_response, model=model, is_fallback=is_fallback)
+        call_id = self._record_llm_call_success(
+            messages=messages,
+            response=chat_response,
+            model=model,
+            is_fallback=is_fallback,
+        )
         self._last_failure_kind = "ok"
-        return chat_response
+        return chat_response, call_id
 
     def _log_spend(
         self,
@@ -312,7 +392,16 @@ class LLMWorker:
         model: str,
         is_fallback: bool,
     ) -> None:
-        """One row per successful API call. Sole spend writer in the worker."""
+        """Append a row to the core-DB ``spend_log``.
+
+        We keep this side-by-side with ``record_llm_call`` because the two
+        tables serve different consumers:
+          - ``spend_log`` (core DB) drives the cross-session rolling $1/day
+            cap query, which runs on every turn — staying lean is essential.
+          - ``llm_calls`` (per-session DB) is the full-payload audit log used
+            by the session detail UI; bigger rows, but scoped to one session.
+        Removing either would break a documented contract — keep both.
+        """
         store.record_spend(
             self._core_conn,
             session_id=self._session_id,
@@ -323,10 +412,110 @@ class LLMWorker:
             is_fallback=is_fallback,
         )
 
+    # ------------------------------------------------------------------
+    # llm_calls audit log
+    # ------------------------------------------------------------------
+
+    def _record_llm_call_success(
+        self,
+        *,
+        messages: list[dict],
+        response: ChatResponse,
+        model: str,
+        is_fallback: bool,
+    ) -> str:
+        """Persist a successful API attempt to the per-session llm_calls log."""
+        return store.record_llm_call(
+            self._session_conn,
+            model=model,
+            is_fallback=is_fallback,
+            request_messages=messages,
+            request_options=_request_options_for_log(),
+            response_text=response.text,
+            finish_reason=None,  # ChatResponse doesn't carry this today
+            tokens_in=response.tokens_in,
+            tokens_out=response.tokens_out,
+            cost_usd=response.cost_usd,
+            status="ok",
+            related_event_id=store.latest_worker_input_event_id(
+                self._session_conn
+            ),
+        )
+
+    def _record_llm_call_failure(
+        self,
+        *,
+        messages: list[dict],
+        model: str,
+        is_fallback: bool,
+        status: str,
+        error_message: str,
+    ) -> str:
+        """Persist a failed (429 / transport) API attempt with zeroed usage."""
+        return store.record_llm_call(
+            self._session_conn,
+            model=model,
+            is_fallback=is_fallback,
+            request_messages=messages,
+            request_options=_request_options_for_log(),
+            response_text=None,
+            finish_reason=None,
+            tokens_in=0,
+            tokens_out=0,
+            cost_usd=0.0,
+            status=status,
+            error_message=error_message,
+            related_event_id=store.latest_worker_input_event_id(
+                self._session_conn
+            ),
+        )
+
+    def _retag_llm_call(
+        self,
+        call_id: str,
+        new_status: str,
+        *,
+        error_message: str | None = None,
+    ) -> None:
+        """Update an existing llm_calls row's status (and optional error).
+
+        Used after envelope parsing decisions: when an ``ok`` row needs to
+        become ``repair_retry`` (parse failed but the API call itself was
+        fine) or ``parse_error`` (final attempt's parse also failed).
+        """
+        if error_message is None:
+            self._session_conn.execute(
+                "UPDATE llm_calls SET status = ? WHERE id = ?",
+                (new_status, call_id),
+            )
+        else:
+            self._session_conn.execute(
+                "UPDATE llm_calls SET status = ?, error_message = ?"
+                " WHERE id = ?",
+                (new_status, error_message, call_id),
+            )
+        self._session_conn.commit()
+
 
 # ---------------------------------------------------------------------------
 # Pure helpers
 # ---------------------------------------------------------------------------
+
+
+def _request_options_for_log() -> dict:
+    """Return the chat-call options (response_format, temperature) for logging.
+
+    Mirrors the values LLMWorker passes to ``OpenRouterClient.chat`` so the
+    llm_calls audit row captures the full request shape. The default
+    temperature (0.2) lives in ``OpenRouterClient.chat`` — we duplicate it
+    here so the log row is self-describing; if either side changes, update
+    both. ``temperature`` is part of the request, not the response, so it
+    belongs in request_options.
+    """
+    return {
+        "response_format": _RESPONSE_FORMAT_JSON,
+        "temperature": 0.2,
+    }
 
 
 def _to_api_messages(messages: list[Message]) -> list[dict]:

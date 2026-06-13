@@ -895,9 +895,53 @@ def derive_active_models() -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# LLM calls table formatting
+# ---------------------------------------------------------------------------
+
+
+_LLM_STATUS_CLASS: dict[str, str] = {
+    "ok": "pass",
+    "rate_limited": "warning",
+    "transport_error": "error",
+    "parse_error": "error",
+    "repair_retry": "warning",
+}
+
+
+def format_llm_call_for_table(call: dict) -> dict:
+    """Decorate an ``llm_calls`` row for template rendering.
+
+    Adds ``ts_short`` (HH:MM:SS), ``model_short`` (last 40 chars — long
+    OpenRouter ids like ``openai/gpt-4-turbo-2024-04-09:free`` would
+    otherwise blow up the table column width), ``status_class`` (pass /
+    warn / error for the badge), and ``request_messages_pretty`` (pre-
+    formatted JSON for the expanded view's ``<pre>`` block). The original
+    row keys are preserved so the template can still read raw values.
+    """
+    out = dict(call)
+    ts_raw = out.get("ts", "")
+    out["ts_short"] = format_time_hms(ts_raw) if isinstance(ts_raw, str) and ts_raw else ""
+    model = out.get("model", "")
+    model_str = str(model) if model is not None else ""
+    out["model_short"] = model_str[-40:] if len(model_str) > 40 else model_str
+    status_raw = out.get("status", "")
+    status_str = str(status_raw) if status_raw is not None else ""
+    out["status_class"] = _LLM_STATUS_CLASS.get(status_str, "neutral")
+    messages = out.get("request_messages")
+    try:
+        out["request_messages_pretty"] = json.dumps(
+            messages, indent=2, default=str, ensure_ascii=False
+        )
+    except (TypeError, ValueError):
+        out["request_messages_pretty"] = str(messages)
+    return out
+
+
 __all__ = [
     "format_time_hms",
     "format_event_for_table",
+    "format_llm_call_for_table",
     "build_conversation",
     "derive_active_models",
 ]

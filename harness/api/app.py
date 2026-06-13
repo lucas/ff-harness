@@ -45,6 +45,7 @@ from harness.api.view_helpers import (
     build_conversation,
     derive_active_models,
     format_event_for_table,
+    format_llm_call_for_table,
 )
 from harness.domain.website_builder import (
     make_orchestrator_config,
@@ -223,6 +224,33 @@ def _serialize_material(row: dict) -> dict:
     }
 
 
+def _serialize_llm_call(row: dict) -> dict:
+    """Serialize an ``llm_calls`` row for JSON response.
+
+    ``request_messages`` and ``request_options`` are already parsed back to
+    Python objects by ``store.load_llm_calls``; we pass them through so the
+    JSON response has nested objects, not nested JSON strings.
+    """
+    return {
+        "id": row["id"],
+        "ts": row["ts"],
+        "model": row["model"],
+        "is_fallback": bool(row["is_fallback"]),
+        "request_messages": row["request_messages"],
+        "request_options": row["request_options"],
+        "response_text": row["response_text"],
+        "finish_reason": row["finish_reason"],
+        "tokens_in": int(row["tokens_in"]),
+        "tokens_out": int(row["tokens_out"]),
+        "cost_usd": float(row["cost_usd"]),
+        "status": row["status"],
+        "error_message": row["error_message"],
+        "related_event_id": row["related_event_id"],
+        "related_material_id": row["related_material_id"],
+        "created_at": row["created_at"],
+    }
+
+
 def _serialize_run_result(result: RunResult) -> dict:
     return {
         "session_id": result.session_id,
@@ -243,6 +271,10 @@ _EVENTS_CAP = 500
 # Chat-first UI renders the events list inside the Details accordion; 200 is
 # the spec'd ceiling — newest last so the recent activity is what's visible.
 _UI_EVENTS_CAP = 200
+# Max llm_calls rows surfaced in JSON + HTML. Chronological order (newest at
+# bottom matches the chat panel). 50 is generous for a session that has not
+# been compacted yet; older calls remain on disk for forensics.
+_LLM_CALLS_CAP = 50
 
 
 def _models_from_env() -> dict:
@@ -326,6 +358,9 @@ def _create_app_routes(app: FastAPI) -> None:
             unresolved = store.load_alarms(conns.session_conn, resolved=False)
             resolved = store.load_alarms(conns.session_conn, resolved=True)
             pending_materials = store.load_pending_materials(conns.session_conn)
+            llm_calls = store.load_llm_calls(
+                conns.session_conn, limit=_LLM_CALLS_CAP
+            )
 
         # Events: cap at 500 most recent (events are ordered ASC by id, which
         # is chronological because UUID7). Keep ascending order in output.
@@ -345,6 +380,7 @@ def _create_app_routes(app: FastAPI) -> None:
                 _serialize_material(m) for m in pending_materials
             ],
             "spend_summary": spend_summary,
+            "llm_calls": [_serialize_llm_call(c) for c in llm_calls],
         }
 
     @app.post("/sessions/{session_id}/resume")
@@ -583,6 +619,9 @@ def _create_app_routes(app: FastAPI) -> None:
             unresolved = store.load_alarms(conns.session_conn, resolved=False)
             resolved = store.load_alarms(conns.session_conn, resolved=True)
             pending_materials = store.load_pending_materials(conns.session_conn)
+            llm_calls_raw = store.load_llm_calls(
+                conns.session_conn, limit=_LLM_CALLS_CAP
+            )
             # Pull every material (not just pending) so the conversation
             # projector can resolve human_resumed payloads back to the
             # question/approval they answered. Cheap: bounded by session size.
@@ -624,6 +663,15 @@ def _create_app_routes(app: FastAPI) -> None:
             e.get("type") == "model_swapped" for e in events_all
         )
 
+        # llm_calls: decorate each row with display-only fields for the table.
+        # The full request_messages + response_text remain on each entry so
+        # the per-row expander can render them; format_llm_call_for_table
+        # also pre-renders the messages JSON for the <pre> block.
+        llm_calls = [
+            format_llm_call_for_table(_serialize_llm_call(c))
+            for c in llm_calls_raw
+        ]
+
         context = {
             "session": _serialize_session(session),
             "events": [_serialize_event(e) for e in events],
@@ -642,6 +690,7 @@ def _create_app_routes(app: FastAPI) -> None:
             "models": models,
             "has_site_preview": has_site_preview,
             "has_site_files": has_site_files,
+            "llm_calls": llm_calls,
         }
         template_name = "_session_main.html" if partial else "session.html"
         return _templates.TemplateResponse(request, template_name, context)

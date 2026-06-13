@@ -465,6 +465,183 @@ def test_rewind_appends_rewound_event_with_correct_payload(tmp_session):
     assert set(rewound["payload"].keys()) == expected_keys
 
 
+# ---------------------------------------------------------------------------
+# llm_calls — full LLM call audit log (per-session DB)
+# ---------------------------------------------------------------------------
+
+
+def _sample_messages() -> list[dict]:
+    return [
+        {"role": "system", "content": "you are a website-building agent"},
+        {"role": "user", "content": "Make me a homepage."},
+    ]
+
+
+def _sample_options() -> dict:
+    return {"response_format": {"type": "json_object"}, "temperature": 0.2}
+
+
+def test_record_llm_call_roundtrip(tmp_session):
+    _, session_conn, _ = tmp_session
+    cid = store.record_llm_call(
+        session_conn,
+        model="deepseek/deepseek-v4-flash:free",
+        is_fallback=False,
+        request_messages=_sample_messages(),
+        request_options=_sample_options(),
+        response_text='{"type":"final","summary":"ok"}',
+        finish_reason="stop",
+        tokens_in=12,
+        tokens_out=8,
+        cost_usd=0.0,
+        status="ok",
+    )
+    assert uuid.UUID(cid).version == 7
+
+    rows = store.load_llm_calls(session_conn)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["id"] == cid
+    assert row["model"] == "deepseek/deepseek-v4-flash:free"
+    assert row["is_fallback"] is False
+    # JSON columns are decoded back to Python.
+    assert row["request_messages"] == _sample_messages()
+    assert row["request_options"] == _sample_options()
+    assert row["response_text"] == '{"type":"final","summary":"ok"}'
+    assert row["finish_reason"] == "stop"
+    assert row["tokens_in"] == 12
+    assert row["tokens_out"] == 8
+    assert row["cost_usd"] == 0.0
+    assert row["status"] == "ok"
+    assert row["error_message"] is None
+    assert row["related_event_id"] is None
+    assert row["related_material_id"] is None
+
+
+def test_record_llm_call_rejects_invalid_status(tmp_session):
+    _, session_conn, _ = tmp_session
+    with pytest.raises(ValueError):
+        store.record_llm_call(
+            session_conn,
+            model="m",
+            is_fallback=False,
+            request_messages=_sample_messages(),
+            request_options=None,
+            response_text=None,
+            finish_reason=None,
+            tokens_in=0,
+            tokens_out=0,
+            cost_usd=0.0,
+            status="bogus_status",
+        )
+
+
+def test_record_llm_call_fk_enforced(tmp_session):
+    _, session_conn, _ = tmp_session
+    bogus = new_id()
+    with pytest.raises(sqlite3.IntegrityError):
+        store.record_llm_call(
+            session_conn,
+            model="m",
+            is_fallback=False,
+            request_messages=_sample_messages(),
+            request_options=None,
+            response_text=None,
+            finish_reason=None,
+            tokens_in=0,
+            tokens_out=0,
+            cost_usd=0.0,
+            status="ok",
+            related_event_id=bogus,
+        )
+
+
+def test_record_llm_call_links_to_existing_event(tmp_session):
+    """The related_event_id FK accepts a real worker_input event id."""
+    _, session_conn, _ = tmp_session
+    eid = store.append_event(
+        session_conn, "worker_input", "bootstrap",
+        {"messages_count": 2, "tokens_estimate": 100},
+    )
+    cid = store.record_llm_call(
+        session_conn,
+        model="m",
+        is_fallback=False,
+        request_messages=_sample_messages(),
+        request_options=None,
+        response_text="x",
+        finish_reason=None,
+        tokens_in=0,
+        tokens_out=0,
+        cost_usd=0.0,
+        status="ok",
+        related_event_id=eid,
+    )
+    rows = store.load_llm_calls(session_conn)
+    assert rows[0]["id"] == cid
+    assert rows[0]["related_event_id"] == eid
+
+
+def test_load_llm_calls_chronological(tmp_session):
+    _, session_conn, _ = tmp_session
+    ids = [
+        store.record_llm_call(
+            session_conn,
+            model=f"m{i}",
+            is_fallback=False,
+            request_messages=_sample_messages(),
+            request_options=None,
+            response_text="x",
+            finish_reason=None,
+            tokens_in=0,
+            tokens_out=0,
+            cost_usd=0.0,
+            status="ok",
+        )
+        for i in range(3)
+    ]
+    rows = store.load_llm_calls(session_conn)
+    assert [r["id"] for r in rows] == ids
+
+
+def test_load_llm_calls_with_limit_returns_most_recent(tmp_session):
+    _, session_conn, _ = tmp_session
+    ids = [
+        store.record_llm_call(
+            session_conn,
+            model=f"m{i}",
+            is_fallback=False,
+            request_messages=_sample_messages(),
+            request_options=None,
+            response_text="x",
+            finish_reason=None,
+            tokens_in=0,
+            tokens_out=0,
+            cost_usd=0.0,
+            status="ok",
+        )
+        for i in range(5)
+    ]
+    rows = store.load_llm_calls(session_conn, limit=2)
+    # The two MOST RECENT, still in chronological (ASC) order.
+    assert [r["id"] for r in rows] == ids[-2:]
+
+
+def test_latest_worker_input_event_id_returns_latest(tmp_session):
+    _, session_conn, _ = tmp_session
+    store.append_event(session_conn, "worker_output", "bootstrap", {})
+    e1 = store.append_event(session_conn, "worker_input", "bootstrap", {"i": 1})
+    store.append_event(session_conn, "tool_call", "bootstrap", {})
+    e2 = store.append_event(session_conn, "worker_input", "bootstrap", {"i": 2})
+    assert store.latest_worker_input_event_id(session_conn) == e2
+    assert e1 != e2
+
+
+def test_latest_worker_input_event_id_returns_none_when_no_events(tmp_session):
+    _, session_conn, _ = tmp_session
+    assert store.latest_worker_input_event_id(session_conn) is None
+
+
 def test_rewind_inside_transaction_no_partial_delete_on_error(tmp_session, monkeypatch):
     """A failure mid-transaction must roll back all deletes + the re-pend."""
     _, session_conn, _ = tmp_session

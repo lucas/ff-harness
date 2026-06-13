@@ -146,6 +146,7 @@ def test_get_detail_on_fresh_session(make_client):
         "alarms",
         "pending_materials",
         "spend_summary",
+        "llm_calls",
     }
 
     # Session row shape.
@@ -772,6 +773,60 @@ def test_rewind_route_404_on_missing_session(make_client):
     )
     assert r.status_code == 404
     assert r.json()["error"] == "not_found"
+
+
+def test_session_detail_includes_llm_calls_list(make_client, tmp_path: Path):
+    """GET /sessions/{id} JSON response includes an ``llm_calls`` array.
+
+    MockWorker bypasses the LLM client so we pre-seed an llm_calls row via
+    ``store.record_llm_call`` directly. The endpoint must surface it in the
+    JSON response with parsed (not nested-stringified) request_messages.
+    """
+    client = make_client([])
+    sid = client.post("/sessions", json={}).json()["session_id"]
+
+    sessions_dir = tmp_path / "data" / "sessions"
+    conn = store.session_connection(sessions_dir, sid)
+    try:
+        store.record_llm_call(
+            conn,
+            model="deepseek/deepseek-v4-flash:free",
+            is_fallback=False,
+            request_messages=[
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "hi"},
+            ],
+            request_options={
+                "response_format": {"type": "json_object"},
+                "temperature": 0.2,
+            },
+            response_text='{"type":"final","summary":"ok"}',
+            finish_reason="stop",
+            tokens_in=5,
+            tokens_out=7,
+            cost_usd=0.0012,
+            status="ok",
+        )
+    finally:
+        conn.close()
+
+    body = client.get(f"/sessions/{sid}").json()
+    assert "llm_calls" in body
+    assert isinstance(body["llm_calls"], list)
+    assert len(body["llm_calls"]) == 1
+    call = body["llm_calls"][0]
+    assert call["model"] == "deepseek/deepseek-v4-flash:free"
+    assert call["status"] == "ok"
+    assert call["tokens_in"] == 5
+    assert call["tokens_out"] == 7
+    assert call["cost_usd"] == pytest.approx(0.0012)
+    assert call["response_text"] == '{"type":"final","summary":"ok"}'
+    # request_messages must come back as a parsed list of dicts, not a
+    # JSON-encoded string.
+    assert isinstance(call["request_messages"], list)
+    assert call["request_messages"][0]["role"] == "system"
+    assert isinstance(call["request_options"], dict)
+    assert call["request_options"]["temperature"] == 0.2
 
 
 def test_rewind_route_400_on_missing_body(make_client):
