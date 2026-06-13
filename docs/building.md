@@ -5,9 +5,9 @@ This file is the live state of the v1 build. It is self-sufficient: after `/clea
 ## Status snapshot
 
 - **Last updated:** 2026-06-13
-- **Current step:** Step 6 — Checkpoints (next up)
-- **Next step:** Step 7 — Orchestrator (MockWorker drives full loop)
-- **Last green test:** `uv run pytest tests/` (152 passed — Steps 0/1/2/3/4/5 combined); `uv run pyright harness/ tests/` (0 errors).
+- **Current step:** Step 7 — Orchestrator (MockWorker drives full loop) — MILESTONE
+- **Next step:** Step 8 — LLMWorker × 2 + LLM client + 429 fallback
+- **Last green test:** `uv run pytest tests/` (179 passed — Steps 0-6 combined); `uv run pyright harness/ tests/` (0 errors).
 - **Active blockers:** none
 
 ## The 12-step checklist
@@ -32,7 +32,7 @@ Each row is one step from the Build Order in `/Users/elroy/.claude/plans/ignore-
 - [x] **Step 5 — Validators + post-hooks.** Status: done (2026-06-13).
   - Gate: `uv run pytest tests/services/test_validators.py tests/services/test_post_hooks.py`
   - Done when: known-bad HTML/CSS fail with specific error keys; known-good pass; `post_hooks.run` writes the 3 SEO files and creates exactly one git commit.
-- [ ] **Step 6 — Checkpoints.** Status: pending.
+- [x] **Step 6 — Checkpoints.** Status: done (2026-06-13).
   - Gate: `uv run pytest tests/services/test_checkpoints.py`
   - Done when: all 5 checkpoints pass on a good fixture, fail on a bad fixture, and `criteria_results` keys match the spec table.
 - [ ] **Step 7 — Orchestrator (MockWorker E2E).** Status: pending.
