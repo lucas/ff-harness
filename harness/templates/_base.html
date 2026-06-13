@@ -319,6 +319,30 @@
       color: var(--fg-faint);
       margin-top: 6px;
     }
+    /* Approval-card rendering inside a chat bubble (request_approval). */
+    .chat-bubble .approval-card { display: block; }
+    .chat-bubble .approval-subject { margin: 0 0 8px; font-size: 1.05em; font-weight: 600; }
+    .chat-bubble .brief-name { font-weight: 600; font-size: 1.05em; margin-bottom: 2px; }
+    .chat-bubble .brief-tagline { color: #666; margin-bottom: 8px; }
+    .chat-bubble .brief-rows {
+      display: grid;
+      grid-template-columns: max-content 1fr;
+      gap: 4px 12px;
+      margin: 0;
+    }
+    .chat-bubble .brief-rows dt { font-weight: 600; color: #444; }
+    .chat-bubble .brief-rows dd { margin: 0; }
+    .chat-bubble .swatch {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      border-radius: 2px;
+      border: 1px solid rgba(0,0,0,0.15);
+      vertical-align: middle;
+      margin-right: 4px;
+    }
+    .chat-bubble .approval-prompt { margin: 8px 0 0; color: #555; }
+
     /* Events table — keep the model-swap highlight visible */
     .event-row.event-model_swapped { background: var(--highlight-bg); }
     .event-row.highlight { background: var(--highlight-bg); }

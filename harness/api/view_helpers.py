@@ -18,6 +18,7 @@ from __future__ import annotations
 import html
 import json
 import os
+import re
 from datetime import datetime
 from typing import Any
 
@@ -268,6 +269,338 @@ def _continuation_body(approved: bool, notes: str | None) -> str:
     return head
 
 
+# ---------------------------------------------------------------------------
+# Approval card rendering (request_approval bubbles)
+# ---------------------------------------------------------------------------
+
+# Hex color sanity check used by the palette swatch renderer. We only emit
+# the value into ``style="background:<value>"`` if it matches — anything
+# else falls back to the escaped text only, so the rule is a hard XSS guard.
+_HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{3,8}$")
+
+# Display labels for Business Brief keys. Unknown keys are humanized by
+# replacing underscores with spaces and title-casing — see ``_humanize_key``.
+_BRIEF_LABELS: dict[str, str] = {
+    "industry": "Industry",
+    "phone": "Phone",
+    "email": "Email",
+    "address": "Address",
+    "service_area": "Service area",
+    "service_areas": "Service areas",
+    "hours": "Hours",
+    "color_palette": "Color palette",
+    "palette": "Color palette",
+    "aesthetic": "Aesthetic",
+    "audience": "Audience",
+    "pages": "Pages",
+    "primary_cta": "Primary CTA",
+    "socials": "Socials",
+    "logo": "Logo",
+}
+
+# Top-level keys that are rendered separately from the brief-rows <dl>
+# (the name + tagline live above the row grid as headings) or that are
+# hoisted out of a nested ``contact`` dict — never repeated in the grid.
+_BRIEF_TOP_KEYS: set[str] = {"name", "tagline", "contact"}
+
+# Preferred display order for known Business Brief keys. Anything not in
+# the list is rendered after, in insertion order.
+_BRIEF_ORDER: list[str] = [
+    "industry",
+    "phone",
+    "email",
+    "address",
+    "service_area",
+    "service_areas",
+    "hours",
+    "color_palette",
+    "palette",
+    "aesthetic",
+    "audience",
+    "pages",
+    "primary_cta",
+    "socials",
+    "logo",
+]
+
+# Friendly day-range labels for the ``hours`` dict. Unknown keys are
+# humanized via ``_humanize_key``.
+_HOURS_LABELS: dict[str, str] = {
+    "mon": "Mon",
+    "tue": "Tue",
+    "wed": "Wed",
+    "thu": "Thu",
+    "fri": "Fri",
+    "sat": "Sat",
+    "sun": "Sun",
+    "mon_thu": "Mon–Thu",
+    "fri_sat": "Fri–Sat",
+    "sat_sun": "Sat–Sun",
+    "mon_fri": "Mon–Fri",
+    "mon_sun": "Mon–Sun",
+}
+
+
+def _humanize_key(key: str) -> str:
+    """Turn ``service_area`` into ``Service Area`` for display."""
+    return key.replace("_", " ").title()
+
+
+def _esc(value: Any) -> str:
+    """HTML-escape a value safely, coercing to str first."""
+    return html.escape(str(value))
+
+
+def _humanize_day_key(key: str) -> str:
+    """Look up or generate a human label for an hours-dict key."""
+    if key in _HOURS_LABELS:
+        return _HOURS_LABELS[key]
+    return key.replace("_", "-").title()
+
+
+def _render_palette_dd(palette: dict) -> str:
+    """Render a palette dict as small color swatches + hex codes.
+
+    Each entry produces ``<span class="swatch" style="background:#hex">``
+    plus a ``<code>#hex</code>`` and the role label. Values that aren't
+    valid hex colors fall back to escaped text only — no inline style.
+    """
+    parts: list[str] = []
+    for role, value in palette.items():
+        role_label = _esc(role)
+        value_str = str(value) if value is not None else ""
+        if _HEX_COLOR_RE.match(value_str):
+            hex_safe = _esc(value_str)
+            parts.append(
+                f'<span class="swatch" style="background:{hex_safe}" '
+                f'title="{role_label}"></span> '
+                f"<code>{hex_safe}</code> {role_label}"
+            )
+        else:
+            # Reject — no inline style emitted, just escaped text.
+            parts.append(f"<code>{_esc(value_str)}</code> {role_label}")
+    return ", ".join(parts)
+
+
+def _render_hours_dd(hours: dict) -> str:
+    """Render an hours dict as ``Mon–Thu: 11:00–21:00`` lines."""
+    lines: list[str] = []
+    for day_key, time_range in hours.items():
+        label = _esc(_humanize_day_key(str(day_key)))
+        lines.append(f"{label}: {_esc(time_range)}")
+    return "<br>".join(lines)
+
+
+def _render_socials_dd(socials: dict) -> str:
+    """Render a socials dict as ``Instagram: @x, Twitter: @y``."""
+    parts: list[str] = []
+    for network, handle in socials.items():
+        net_label = _esc(str(network).title())
+        parts.append(f"{net_label}: {_esc(handle)}")
+    return ", ".join(parts)
+
+
+def _render_value_dd(key: str, value: Any) -> str:
+    """Render a value as the inner HTML of a <dd>, dispatching by type.
+
+    Handles palettes/hours/socials by key name, lists via ", ".join,
+    nested dicts as "key: value" sub-blocks, and scalars as escaped str.
+    """
+    if key in ("palette", "color_palette") and isinstance(value, dict):
+        return _render_palette_dd(value)
+    if key == "hours" and isinstance(value, dict):
+        return _render_hours_dd(value)
+    if key == "socials" and isinstance(value, dict):
+        return _render_socials_dd(value)
+    if isinstance(value, list):
+        return _esc(", ".join(str(item) for item in value))
+    if isinstance(value, dict):
+        lines: list[str] = []
+        for k, v in value.items():
+            lines.append(f"{_esc(str(k))}: {_esc(v)}")
+        return "<br>".join(lines)
+    return _esc(value)
+
+
+def _brief_row_keys(details: dict) -> list[str]:
+    """Return the keys to render in the brief-rows grid, in display order.
+
+    Skips top-level keys handled separately (name/tagline/contact). The
+    fixed-order keys come first; any leftover keys follow in insertion
+    order so unknown fields still surface in the card.
+    """
+    present = [k for k in details.keys() if k not in _BRIEF_TOP_KEYS]
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for k in _BRIEF_ORDER:
+        if k in present:
+            ordered.append(k)
+            seen.add(k)
+    for k in present:
+        if k not in seen:
+            ordered.append(k)
+    return ordered
+
+
+def _label_for_key(key: str, label_map: dict[str, str] | None = None) -> str:
+    """Resolve a display label, falling back to ``_humanize_key``."""
+    if label_map and key in label_map:
+        return label_map[key]
+    return _humanize_key(key)
+
+
+def _render_brief_rows(details: dict, *, label_map: dict[str, str]) -> str:
+    """Render the ``<dl class="brief-rows">`` grid for a details dict.
+
+    ``contact`` is hoisted: ``phone``/``email``/``address`` inside it are
+    promoted to top-level rows so the user sees a flat list rather than
+    a nested sub-block.
+    """
+    hoisted: dict[str, Any] = {}
+    contact = details.get("contact")
+    if isinstance(contact, dict):
+        for sub_key in ("phone", "email", "address"):
+            if sub_key in contact and sub_key not in details:
+                hoisted[sub_key] = contact[sub_key]
+
+    # Build the ordered list of rows: hoisted keys interleaved into the
+    # normal key order so they sit alongside top-level phone/email/address.
+    merged: dict[str, Any] = {}
+    for k in details.keys():
+        if k in _BRIEF_TOP_KEYS:
+            continue
+        merged[k] = details[k]
+    for k, v in hoisted.items():
+        merged.setdefault(k, v)
+
+    keys = _brief_row_keys({**merged, **{k: True for k in hoisted}})
+    rows: list[str] = []
+    for key in keys:
+        if key not in merged:
+            continue
+        label = _esc(_label_for_key(key, label_map))
+        dd_html = _render_value_dd(key, merged[key])
+        rows.append(f"<dt>{label}</dt><dd>{dd_html}</dd>")
+    if not rows:
+        return ""
+    return '<dl class="brief-rows">' + "".join(rows) + "</dl>"
+
+
+def _render_approval_card(
+    subject: str, details: dict | None
+) -> tuple[str, str]:
+    """Render the approval bubble's ``(body_html, body_plain)`` pair.
+
+    Two named subjects (``business_brief``, ``mockup``) get special-case
+    layouts; everything else falls back to a labeled list. The HTML is
+    built directly (NOT via mistune) — every user value is escaped via
+    ``html.escape`` before being concatenated into the output.
+    """
+    details_dict = details if isinstance(details, dict) else {}
+
+    if subject == "business_brief":
+        body_html, body_plain = _render_business_brief_card(details_dict)
+    elif subject == "mockup":
+        body_html, body_plain = _render_mockup_card(details_dict)
+    else:
+        body_html, body_plain = _render_generic_card(subject, details_dict)
+
+    return body_html, body_plain
+
+
+def _render_business_brief_card(details: dict) -> tuple[str, str]:
+    """Render the ``business_brief`` approval card with hoisted name/tagline."""
+    parts: list[str] = ['<div class="approval-card">']
+    parts.append('<h3 class="approval-subject">Business Brief</h3>')
+
+    name_val = details.get("name")
+    tagline_val = details.get("tagline")
+    plain_extras: list[str] = []
+    if isinstance(name_val, str) and name_val:
+        parts.append(f'<div class="brief-name">{_esc(name_val)}</div>')
+        plain_extras.append(name_val)
+    if isinstance(tagline_val, str) and tagline_val:
+        parts.append(
+            f'<div class="brief-tagline"><em>{_esc(tagline_val)}</em></div>'
+        )
+        plain_extras.append(tagline_val)
+
+    rows_html = _render_brief_rows(details, label_map=_BRIEF_LABELS)
+    if rows_html:
+        parts.append(rows_html)
+    elif not plain_extras:
+        # Empty details — show a friendly prompt so the bubble isn't blank.
+        parts.append(
+            '<p class="approval-prompt">'
+            "Approve the business brief above to proceed."
+            "</p>"
+        )
+
+    parts.append("</div>")
+    body_html = "".join(parts)
+    body_plain = "Approval request: business_brief"
+    if plain_extras:
+        body_plain = body_plain + " — " + " — ".join(plain_extras)
+    return body_html, body_plain
+
+
+def _render_mockup_card(details: dict) -> tuple[str, str]:
+    """Render the ``mockup`` approval card (compact, no ASCII re-display)."""
+    parts: list[str] = ['<div class="approval-card">']
+    parts.append('<h3 class="approval-subject">Mockup</h3>')
+    parts.append(
+        '<p class="approval-prompt">'
+        "Approve the layout above to proceed to building the site."
+        "</p>"
+    )
+
+    # Optional compact summary if the agent included sections / primary_cta.
+    summary_pairs: list[tuple[str, str]] = []
+    sections = details.get("sections")
+    if isinstance(sections, list) and sections:
+        names: list[str] = []
+        for sec in sections:
+            if isinstance(sec, dict) and isinstance(sec.get("name"), str):
+                names.append(sec["name"])
+            elif isinstance(sec, str):
+                names.append(sec)
+        if names:
+            summary_pairs.append(("Sections", ", ".join(names)))
+    primary_cta = details.get("primary_cta")
+    if isinstance(primary_cta, str) and primary_cta:
+        summary_pairs.append(("Primary CTA", primary_cta))
+
+    if summary_pairs:
+        rows = "".join(
+            f"<dt>{_esc(label)}</dt><dd>{_esc(val)}</dd>"
+            for label, val in summary_pairs
+        )
+        parts.append(f'<dl class="brief-rows">{rows}</dl>')
+
+    parts.append("</div>")
+    return "".join(parts), "Approval request: mockup"
+
+
+def _render_generic_card(subject: str, details: dict) -> tuple[str, str]:
+    """Fallback renderer: subject as heading + labeled list of details."""
+    heading = _humanize_key(subject) if subject else "Approval"
+    parts: list[str] = ['<div class="approval-card">']
+    parts.append(
+        f'<h3 class="approval-subject">{_esc(heading)}</h3>'
+    )
+    rows_html = _render_brief_rows(details, label_map={})
+    if rows_html:
+        parts.append(rows_html)
+    else:
+        parts.append(
+            '<p class="approval-prompt">'
+            "Please review and approve."
+            "</p>"
+        )
+    parts.append("</div>")
+    return "".join(parts), f"Approval request: {subject}"
+
+
 def build_conversation(
     events: list[dict],
     materials_by_id: dict[str, dict],
@@ -365,10 +698,20 @@ def build_conversation(
                 tool = envelope.get("tool", "")
                 args = _as_dict(envelope.get("args"))
                 body, extra, render_md = _tool_call_body(tool, args)
+                # Approval bubbles (and any future tool that builds its own
+                # HTML) pass a pre-rendered, already-escaped fragment via
+                # ``body_html`` in the extra dict. When present, that wins
+                # over markdown / plain-text rendering.
+                override_html = extra.pop("body_html", None)
                 meta.update(extra)
-                body_html = (
-                    _render_markdown(body) if render_md else _escape_plain(body)
-                )
+                if isinstance(override_html, str):
+                    body_html = override_html
+                else:
+                    body_html = (
+                        _render_markdown(body)
+                        if render_md
+                        else _escape_plain(body)
+                    )
                 out.append({
                     "role": "agent",
                     "body": body,
@@ -407,16 +750,16 @@ def _tool_call_body(tool: str, args: dict) -> tuple[str, dict, bool]:
             meta["options"] = [str(o) for o in opts]
         return body, meta, True
     if tool == "request_approval":
-        subject = args.get("subject") or args.get("summary") or "?"
-        body = f"Requesting approval: {subject}"
-        meta_out: dict[str, Any] = {}
-        details = args.get("details") or args.get("payload")
-        if isinstance(details, dict) and details:
-            try:
-                meta_out["details_json"] = json.dumps(details, indent=2, default=str)
-            except (TypeError, ValueError):
-                meta_out["details_json"] = str(details)
-        return body, meta_out, True
+        subject_raw = args.get("subject") or args.get("summary") or "?"
+        subject = str(subject_raw)
+        details_raw = args.get("details") or args.get("payload")
+        details = details_raw if isinstance(details_raw, dict) else None
+        card_html, card_plain = _render_approval_card(subject, details)
+        # The pre-rendered HTML rides on ``meta["body_html"]`` and is
+        # consumed (and popped) by ``build_conversation``, so it never
+        # leaks into the conversation entry's user-facing ``meta`` dict.
+        meta_out: dict[str, Any] = {"body_html": card_html}
+        return card_plain, meta_out, False
     if tool == "render_mockup":
         layout = _as_dict(args.get("layout_spec"))
         sections_raw = layout.get("sections")

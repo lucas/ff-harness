@@ -306,9 +306,13 @@ class TestBuildConversation:
         assert msgs[0]["body"] == "What is your business name?"
         # Freeform answer = literal text.
         assert msgs[1]["body"] == "Maria's Pizza"
-        # request_approval bubble = "Requesting approval: <subject>".
-        assert msgs[2]["body"].startswith("Requesting approval: mockup")
-        assert "details_json" in msgs[2]["meta"]
+        # request_approval bubble: plain body summarises the request, and
+        # body_html carries the rendered approval card (subject-aware) —
+        # no JSON expander, no `<details>` wrapper.
+        assert msgs[2]["body"].startswith("Approval request: mockup")
+        assert "details_json" not in msgs[2]["meta"]
+        assert "body_html" not in msgs[2]["meta"]
+        assert "approval-card" in msgs[2]["body_html"]
         # Approval user bubble = "Approved <subject>".
         assert msgs[3]["body"].startswith("Approved mockup")
         # write_file bubble = "Wrote {path} ({bytes} bytes)".
@@ -452,7 +456,10 @@ class TestMarkdownRendering:
         msgs = view_helpers.build_conversation(events, {})
         assert "<strong>theme</strong>" in msgs[0]["body_html"]
 
-    def test_agent_bubble_for_request_approval_renders_markdown(self) -> None:
+    def test_agent_bubble_for_request_approval_renders_card_not_markdown(self) -> None:
+        """Approval bubbles render a structured card, NOT a markdown
+        paragraph. Subject text is escaped (no live ``**``-to-``<strong>``
+        substitution) because the body is intentionally non-prose."""
         events = [
             _event(
                 "worker_output",
@@ -466,10 +473,11 @@ class TestMarkdownRendering:
             )
         ]
         msgs = view_helpers.build_conversation(events, {})
-        # Body keeps the literal markdown subject.
-        assert msgs[0]["body"] == "Requesting approval: ship the **MVP** site"
-        # body_html has the bold rendered.
-        assert "<strong>MVP</strong>" in msgs[0]["body_html"]
+        # Plain body summarises the approval for tests/debug.
+        assert msgs[0]["body"].startswith("Approval request: ship the **MVP** site")
+        # body_html carries an approval card — no markdown <strong> rendered.
+        assert "approval-card" in msgs[0]["body_html"]
+        assert "<strong>MVP</strong>" not in msgs[0]["body_html"]
 
     def test_agent_bubble_for_tool_call_summary_is_not_markdown_rendered(self) -> None:
         events = [
@@ -554,6 +562,170 @@ class TestMarkdownRendering:
         msgs = view_helpers.build_conversation(events, {})
         assert "<img" not in msgs[0]["body_html"]
         assert "&lt;img" in msgs[0]["body_html"]
+
+
+# ---------------------------------------------------------------------------
+# Approval card rendering (request_approval bubbles)
+# ---------------------------------------------------------------------------
+
+
+class TestApprovalCardRendering:
+    """The ``request_approval`` chat bubble must NEVER show raw JSON or a
+    ``<details>`` expander. ``subject == 'business_brief'`` and
+    ``subject == 'mockup'`` get specific layouts; any other subject falls
+    back to a labeled list (still no JSON). Every value derived from the
+    agent's ``details`` dict is HTML-escaped because the body bypasses
+    mistune — we emit HTML directly.
+    """
+
+    @staticmethod
+    def _approval(subject: str, details: dict | None) -> list[dict]:
+        return [
+            _event(
+                "worker_output",
+                {
+                    "envelope": {
+                        "type": "tool_call",
+                        "tool": "request_approval",
+                        "args": {"subject": subject, "details": details},
+                    }
+                },
+            )
+        ]
+
+    def test_business_brief_renders_as_card(self) -> None:
+        events = self._approval(
+            "business_brief",
+            {
+                "name": "Maria's",
+                "industry": "restaurant",
+                "phone": "555-0142",
+                "pages": ["Home", "Menu"],
+            },
+        )
+        msgs = view_helpers.build_conversation(events, {})
+        body_html = msgs[0]["body_html"]
+        assert '<div class="approval-card">' in body_html
+        assert '<h3 class="approval-subject">Business Brief</h3>' in body_html
+        # ``Maria's`` has an apostrophe — html.escape uses &#x27; for that.
+        assert '<div class="brief-name">Maria&#x27;s</div>' in body_html
+        assert "<dt>Industry</dt><dd>restaurant</dd>" in body_html
+        assert "<dt>Pages</dt><dd>Home, Menu</dd>" in body_html
+        # No raw JSON / details expander.
+        assert "<pre>" not in body_html
+        assert "<details" not in body_html
+        # No JSON open-brace from a dumped dict.
+        assert "{" not in body_html
+
+    def test_business_brief_palette_renders_swatches(self) -> None:
+        events = self._approval(
+            "business_brief",
+            {"palette": {"primary": "#7B1E1E", "secondary": "#F5E9DA"}},
+        )
+        msgs = view_helpers.build_conversation(events, {})
+        body_html = msgs[0]["body_html"]
+        assert '<span class="swatch" style="background:#7B1E1E"' in body_html
+        assert "<code>#7B1E1E</code>" in body_html
+        assert '<span class="swatch" style="background:#F5E9DA"' in body_html
+        assert "<code>#F5E9DA</code>" in body_html
+
+    def test_business_brief_invalid_palette_color_does_not_render_swatch(self) -> None:
+        events = self._approval(
+            "business_brief",
+            {"palette": {"primary": "javascript:alert(1)"}},
+        )
+        msgs = view_helpers.build_conversation(events, {})
+        body_html = msgs[0]["body_html"]
+        # No inline style with a non-hex value.
+        assert 'style="background:javascript' not in body_html
+        # The dangerous text is at least escaped (no live `javascript:` href
+        # because there's no ``<a>``; we only ever put it into <code>).
+        assert "<code>" in body_html
+
+    def test_business_brief_hours_dict_renders_human_labels(self) -> None:
+        events = self._approval(
+            "business_brief",
+            {"hours": {"mon_thu": "11:00-21:00", "fri_sat": "11:00-22:00"}},
+        )
+        msgs = view_helpers.build_conversation(events, {})
+        body_html = msgs[0]["body_html"]
+        assert "Mon–Thu" in body_html
+        assert "Fri–Sat" in body_html
+        assert "11:00-21:00" in body_html
+
+    def test_business_brief_contact_dict_hoists_fields(self) -> None:
+        events = self._approval(
+            "business_brief",
+            {"contact": {"phone": "555", "email": "x@y"}},
+        )
+        msgs = view_helpers.build_conversation(events, {})
+        body_html = msgs[0]["body_html"]
+        assert "<dt>Phone</dt><dd>555</dd>" in body_html
+        assert "<dt>Email</dt><dd>x@y</dd>" in body_html
+        # No nested Contact sub-block (we hoisted phone/email).
+        assert "<dt>Contact</dt>" not in body_html
+
+    def test_business_brief_socials_dict_renders_inline(self) -> None:
+        events = self._approval(
+            "business_brief",
+            {"socials": {"instagram": "@x", "twitter": "@y"}},
+        )
+        msgs = view_helpers.build_conversation(events, {})
+        body_html = msgs[0]["body_html"].lower()
+        assert "instagram: @x" in body_html
+        assert "twitter: @y" in body_html
+
+    def test_mockup_approval_renders_compact(self) -> None:
+        events = self._approval(
+            "mockup",
+            {
+                "sections": [{"name": "Header"}, {"name": "Hero"}],
+                "primary_cta": "Reserve",
+            },
+        )
+        msgs = view_helpers.build_conversation(events, {})
+        body_html = msgs[0]["body_html"]
+        assert '<h3 class="approval-subject">Mockup</h3>' in body_html
+        assert "<dt>Sections</dt>" in body_html
+        assert "Header, Hero" in body_html
+        # No ASCII art — the prior render_mockup bubble already showed it.
+        # We just confirm there's no large preformatted block in this bubble.
+        assert "<pre>" not in body_html
+
+    def test_unknown_subject_falls_back_to_labeled_list(self) -> None:
+        events = self._approval(
+            "shipping_terms",
+            {"cutoff_time": "3pm", "free_threshold_usd": 50},
+        )
+        msgs = view_helpers.build_conversation(events, {})
+        body_html = msgs[0]["body_html"]
+        assert '<h3 class="approval-subject">Shipping Terms</h3>' in body_html
+        assert "<dt>Cutoff Time</dt><dd>3pm</dd>" in body_html
+        assert "<dt>Free Threshold Usd</dt><dd>50</dd>" in body_html
+        # No raw JSON.
+        assert "<pre>" not in body_html
+        assert "<details" not in body_html
+
+    def test_approval_body_html_escapes_user_content(self) -> None:
+        events = self._approval(
+            "business_brief",
+            {"name": "<script>alert(1)</script>"},
+        )
+        msgs = view_helpers.build_conversation(events, {})
+        body_html = msgs[0]["body_html"]
+        # No live <script> tag in the rendered HTML.
+        assert "<script>" not in body_html
+        assert "&lt;script&gt;" in body_html
+
+    def test_approval_no_details_renders_just_heading(self) -> None:
+        for details in (None, {}):
+            events = self._approval("business_brief", details)
+            msgs = view_helpers.build_conversation(events, {})
+            body_html = msgs[0]["body_html"]
+            assert '<h3 class="approval-subject">Business Brief</h3>' in body_html
+            assert 'class="approval-prompt"' in body_html
+            # No crash, no JSON.
+            assert "<pre>" not in body_html
 
 
 # ---------------------------------------------------------------------------

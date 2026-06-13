@@ -19,12 +19,6 @@
           {% if msg.meta.options %}
             <div class="chat-options">Options: {{ msg.meta.options | join(", ") }}</div>
           {% endif %}
-          {% if msg.meta.details_json %}
-            <details style="margin-top:6px;">
-              <summary>Approval details</summary>
-              <pre>{{ msg.meta.details_json }}</pre>
-            </details>
-          {% endif %}
         </div>
       {% endfor %}
     {% else %}

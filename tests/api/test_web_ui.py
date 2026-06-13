@@ -601,3 +601,51 @@ def test_other_button_js_does_not_hide_options(make_test_app):
     assert "options-row" not in body or "style.display = 'none'" not in body.split("options-row", 1)[1]
     # The reveal handler is still present so Other… still works.
     assert 'data-action="reveal-other"' in body or "reveal-other" in body
+
+
+# ---------------------------------------------------------------------------
+# 17. request_approval bubble renders a subject-aware card, not raw JSON
+# ---------------------------------------------------------------------------
+
+
+def test_session_view_renders_brief_approval_card(make_test_app):
+    """End-to-end: a request_approval(subject='business_brief', details=...)
+    turn must produce a chat bubble containing the approval card markup
+    (heading + at least one brief field) and NOT a raw JSON dump or a
+    ``<details>`` expander wrapping the brief.
+    """
+    brief = {
+        "name": "Maria's Pizzeria",
+        "industry": "restaurant",
+        "tagline": "Wood-fired pizza, made by hand.",
+        "pages": ["Home", "Menu"],
+    }
+    responses: list[ToolCall | Final | Escalate] = [
+        ToolCall(
+            tool="request_approval",
+            args={"subject": "business_brief", "details": brief},
+        ),
+        Final(summary="never reached in this test"),
+    ]
+    client, _ = make_test_app(responses)
+    sid = _create_session(client)
+    r = client.post(f"/sessions/{sid}/resume", json={})
+    assert r.status_code == 200
+    assert r.json()["status"] == "awaiting_human"
+
+    r = client.get(f"/sessions/{sid}/view")
+    assert r.status_code == 200
+    body = r.text
+
+    chat_start = body.find('id="chat-log"')
+    chat_end = body.find('id="chat-input"', chat_start)
+    chat_section = body[chat_start:chat_end]
+
+    # Card markup is present.
+    assert '<div class="approval-card">' in chat_section
+    assert '<h3 class="approval-subject">Business Brief</h3>' in chat_section
+    assert "<dt>Industry</dt>" in chat_section
+    # The brief is NOT dumped as a JSON pre-block or wrapped in <details>.
+    assert "<pre>" not in chat_section
+    # No `<details>` wrapping the approval JSON in the chat section.
+    assert "Approval details</summary>" not in chat_section
