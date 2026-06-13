@@ -415,6 +415,112 @@ def test_400_on_answer_without_material_id(make_client):
     assert isinstance(body["detail"], dict)
 
 
+def test_message_endpoint_appends_user_input_and_resumes(
+    make_client, tmp_path: Path
+):
+    """POST /message persists a user_answer w/ unprompted=True, appends
+    human_resumed, flips status to active, and drives the loop to completion."""
+    scripted: list[ToolCall | Final | Escalate] = [
+        Final(summary="acknowledged"),
+    ]
+    client = make_client(scripted)
+    sid = client.post("/sessions", json={}).json()["session_id"]
+
+    r = client.post(
+        f"/sessions/{sid}/message",
+        json={"content": "build a one-page site for a coffee shop"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "completed"
+    assert body["terminal"] is True
+
+    detail = client.get(f"/sessions/{sid}").json()
+    assert detail["session"]["status"] == "completed"
+    # Event log includes the human_resumed with our unprompted text.
+    resumed = [e for e in detail["events"] if e["type"] == "human_resumed"]
+    assert len(resumed) >= 1
+    found = False
+    for ev in resumed:
+        a = (ev.get("payload") or {}).get("answer_or_decision") or {}
+        if (
+            a.get("answer_text") == "build a one-page site for a coffee shop"
+            and a.get("unprompted") is True
+        ):
+            found = True
+            break
+    assert found, f"unprompted human_resumed not found in events: {resumed!r}"
+
+    # Material row exists with unprompted=True in content.
+    db_path = tmp_path / "data" / "sessions" / f"{sid}.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT type, content FROM material WHERE type = 'user_answer'"
+    ).fetchall()
+    conn.close()
+    import json as _json
+    matched = [
+        r for r in rows if _json.loads(r["content"]).get("unprompted") is True
+    ]
+    assert len(matched) == 1
+    assert (
+        _json.loads(matched[0]["content"])["answer_text"]
+        == "build a one-page site for a coffee shop"
+    )
+
+
+def test_message_endpoint_400_on_empty_content(make_client):
+    """Both empty string and missing field return the standard 400 shape."""
+    client = make_client([])
+    sid = client.post("/sessions", json={}).json()["session_id"]
+
+    r = client.post(f"/sessions/{sid}/message", json={"content": ""})
+    assert r.status_code == 400
+    assert r.json()["error"] == "bad_request"
+
+    r = client.post(f"/sessions/{sid}/message", json={"content": "   "})
+    assert r.status_code == 400
+    assert r.json()["error"] == "bad_request"
+
+    r = client.post(f"/sessions/{sid}/message", json={})
+    assert r.status_code == 400
+    assert r.json()["error"] == "bad_request"
+
+
+def test_message_endpoint_404_on_missing_session(make_client):
+    client = make_client([])
+    fake = "00000000-0000-7000-8000-000000000000"
+    r = client.post(f"/sessions/{fake}/message", json={"content": "hello"})
+    assert r.status_code == 404
+    assert r.json()["error"] == "not_found"
+
+
+def test_message_endpoint_reactivates_completed_session(make_client):
+    """A completed session must accept a /message and resume; status reflects
+    the new MockWorker response (here: another Final -> completed)."""
+    scripted: list[ToolCall | Final | Escalate] = [
+        Final(summary="first done"),
+        Final(summary="second done"),
+    ]
+    client = make_client(scripted)
+    sid = client.post("/sessions", json={}).json()["session_id"]
+
+    r1 = client.post(f"/sessions/{sid}/resume", json={})
+    assert r1.json()["status"] == "completed"
+
+    # Drive it again via /message; the second Final fires.
+    r2 = client.post(
+        f"/sessions/{sid}/message",
+        json={"content": "actually, please reconsider"},
+    )
+    assert r2.status_code == 200
+    body = r2.json()
+    # The MockWorker is called a SECOND time and returns a fresh Final.
+    assert body["status"] == "completed"
+    assert body["terminal"] is True
+
+
 def test_400_on_answer_to_approval_without_approved(make_client):
     """Pending approval requires `approved` in the body; otherwise 400."""
     scripted: list[ToolCall | Final | Escalate] = [

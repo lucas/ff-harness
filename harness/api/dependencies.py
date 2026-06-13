@@ -18,6 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import Request
 
 from harness.domain.website_builder import make_worker_for_stage
@@ -62,6 +63,11 @@ def build_default_app_context(
     OpenRouterClient (which itself reads `OPENROUTER_API_KEY` lazily at call
     time, so building this context does not require the key to be set).
     """
+    # Defense-in-depth: also call load_dotenv here in case build_default_app_context
+    # is invoked from a code path that bypassed `harness.api.app`'s import-time call
+    # (e.g. a future CLI). Idempotent and does not override existing env vars.
+    load_dotenv()
+
     if data_dir is None:
         env_dir = os.environ.get("HARNESS_DATA_DIR")
         data_dir = Path(env_dir) if env_dir else _DEFAULT_DATA_DIR

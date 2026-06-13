@@ -250,6 +250,45 @@ def test_static_site_serving(make_test_app):
 # ---------------------------------------------------------------------------
 
 
+def test_chat_panel_renders(make_test_app):
+    """After POST /message, the chat panel section contains the user message
+    bubble (and at least one agent bubble for the Final reply)."""
+    client, _ = make_test_app([Final(summary="acknowledged thanks")])
+    sid = _create_session(client)
+
+    r = client.post(
+        f"/sessions/{sid}/message",
+        json={"content": "ping from the test"},
+    )
+    assert r.status_code == 200, r.text
+
+    r = client.get(f"/sessions/{sid}/view")
+    assert r.status_code == 200
+    body = r.text
+    # Chat panel section identifier.
+    assert 'id="chat-panel"' in body
+    # User message bubble must include our text.
+    assert "ping from the test" in body
+    # Agent bubble for the Final envelope.
+    assert "acknowledged thanks" in body
+    # Both user and agent rows rendered with distinct role classes.
+    assert "chat-row user" in body
+    assert "chat-row agent" in body
+
+
+def test_polling_removed(make_test_app):
+    """Regression guard: the session detail page must not include a JS
+    polling loop. setInterval would clobber form state / details toggles."""
+    client, _ = make_test_app()
+    sid = _create_session(client)
+
+    r = client.get(f"/sessions/{sid}/view")
+    assert r.status_code == 200
+    assert "setinterval" not in r.text.lower(), (
+        "session.html must not include setInterval polling"
+    )
+
+
 def test_templates_handle_empty_state(make_test_app):
     """A freshly-created session has no events / checkpoints / alarms /
     pending materials / spend rows. The detail page must still render."""

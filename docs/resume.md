@@ -38,6 +38,11 @@ A **harness** (the framework an AI agent lives inside) for the 24-hour Build Cha
 - **Also:** context compaction; sub-agents (own session); full event + cost logging.
 - **Deploy:** FastAPI in Docker, host bind-mount for SQLite data, HTML/JS/CSS landing page = HITL + observability surface.
 
+## v1 production fixes (post-Step 11)
+- **`.env` loading:** `load_dotenv()` is called at import time of `harness/api/app.py` and inside `dependencies.build_default_app_context` (defense-in-depth). `OPENROUTER_API_KEY` and the four `MODEL_*` vars are now picked up from `.env` automatically.
+- **Polling removed:** `session.html` no longer auto-polls every 2s (which was clobbering form state and `<details>` toggles). Replaced with an explicit "Refresh" link. The `?partial=1` route handler is retained for future smart-partial updates.
+- **Chat panel:** new `POST /sessions/{id}/message` endpoint accepts `{content: str}`, persists a `user_answer` with `unprompted=True`, appends a `human_resumed` event, reactivates the session (even if completed), and drives the orchestrator. The session detail page renders a chat panel above the activity log; bubbles project from `human_resumed` and `worker_output` envelopes (final / escalate / tool_call).
+
 ## Demo-domain flow (website builder)
 onboarding (`bootstrap` skill) → **Business Brief** (defaults baked in; injected into every WorkerContext) → ASCII mockup approval → generate SEO-optimized HTML+CSS+JS + regenerate `sitemap.xml`/`robots.txt`/`llms.txt` each iteration → auto git commit → **final intent audit** vs the brief.
 - **Tools:** `ask_user`, `request_approval`, `render_mockup`, `read`/`write`/`list` files, `validate_site`, `regenerate_seo_artifacts`, `git_history`/`git_revert`.
