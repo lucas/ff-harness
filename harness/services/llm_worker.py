@@ -56,6 +56,21 @@ from harness.services.llm import (
 _RESPONSE_FORMAT_JSON: dict = {"type": "json_object"}
 _RAW_PREVIEW_MAX = 500
 
+# Language-drift guardrail thresholds. Trigger a one-shot English-strict
+# retry when the response contains a meaningful proportion of CJK characters
+# (Chinese / Japanese / Korean). The threshold is permissive enough to NOT
+# flag an envelope that quotes a CJK business name in a single field (a name
+# of ~5 chars is ~0.5% of a 1000-char response) but catches the failure mode
+# where the entire body is in a non-English language and would never parse
+# as the JSON envelope downstream.
+_CJK_REJECT_MIN_COUNT = 8
+_CJK_REJECT_MIN_RATIO = 0.03
+_ENGLISH_STRICT_DIRECTIVE = (
+    "CRITICAL: Reply in ENGLISH ONLY. Your response must be a JSON envelope"
+    " as previously specified, with English keys and English values. Do not"
+    " switch languages."
+)
+
 
 class LLMWorker:
     """Worker that talks to a single OpenRouter model (with optional fallback).
@@ -84,7 +99,20 @@ class LLMWorker:
         self._session_id = session_id
 
     def act(self, ctx: WorkerContext) -> ToolCall | Final | Escalate:
-        """One turn: convert context -> OpenRouter call -> typed envelope."""
+        """One turn: convert context -> OpenRouter call -> typed envelope.
+
+        Failure modes are handled with two INDEPENDENT one-shot retries in a
+        fixed order, so a worst-case turn issues up to FOUR API calls:
+
+          1. initial call (primary, with 429 swap to fallback if configured)
+          2. language-drift retry (if response is heavy CJK)
+          3. envelope parse
+          4. repair retry (if parse failed)
+
+        The CJK check runs BEFORE envelope parse so a Chinese response is
+        logged as `language_violation` rather than misclassified as
+        `parse_error` — they're distinct failure modes in the audit log.
+        """
         api_messages = _to_api_messages(ctx.messages)
 
         # First attempt: primary model. On 429, try the fallback (if any).
@@ -98,6 +126,22 @@ class LLMWorker:
             return Escalate(reason="rate limited" if self._last_failure_kind == "rate_limited" else "transport error")
 
         chat_response, model_used, is_fallback, first_call_id = first_chat
+
+        # Language-drift gate. If the response is heavy CJK, swap in the
+        # retry's (response, model, is_fallback, call_id) tuple for the rest
+        # of the parse pipeline. On terminal language violation, escalate
+        # directly without ever attempting a parse.
+        gated = self._enforce_language(
+            api_messages=api_messages,
+            chat_response=chat_response,
+            model_used=model_used,
+            is_fallback=is_fallback,
+            call_id=first_call_id,
+            ctx=ctx,
+        )
+        if gated is None:
+            return Escalate(reason="language drift")
+        chat_response, model_used, is_fallback, first_call_id = gated
 
         # Try to parse the envelope. On failure, attempt a single repair retry.
         parse_result = _try_parse(chat_response.text)
@@ -159,6 +203,87 @@ class LLMWorker:
     # ------------------------------------------------------------------
 
     _last_failure_kind: Literal["rate_limited", "transport", "ok"] = "ok"
+
+    def _enforce_language(
+        self,
+        *,
+        api_messages: list[dict],
+        chat_response: ChatResponse,
+        model_used: str,
+        is_fallback: bool,
+        call_id: str,
+        ctx: WorkerContext,
+    ) -> tuple[ChatResponse, str, bool, str] | None:
+        """Run the CJK guardrail; on violation, attempt ONE English-strict retry.
+
+        Returns the (possibly-replaced) (response, model, is_fallback, call_id)
+        tuple to use for the rest of the parse pipeline, or ``None`` when the
+        language violation is terminal (retry also CJK / retry blew up
+        transport-side). On terminal failure this method has already raised
+        the appropriate alarm.
+        """
+        ratio, count = _cjk_char_ratio(chat_response.text)
+        if count < _CJK_REJECT_MIN_COUNT and ratio < _CJK_REJECT_MIN_RATIO:
+            return chat_response, model_used, is_fallback, call_id
+
+        # First-attempt language violation: re-tag the row so the audit log
+        # captures the failure mode distinctly from parse_error.
+        self._retag_llm_call(
+            call_id,
+            "language_violation",
+            error_message=f"CJK chars: {count} ({ratio:.2%})",
+        )
+
+        # One-shot English-strict retry on the same model that just answered.
+        # No swap layer here — the issue is content, not transport. Mirrors
+        # the repair-retry policy.
+        retry_messages = api_messages + [_english_directive_message()]
+        retry_chat = self._call_one(
+            model=model_used,
+            messages=retry_messages,
+            is_fallback=is_fallback,
+            ctx=ctx,
+        )
+        if retry_chat is None:
+            # The retry itself failed transport-side (`_call_one` already
+            # raised the appropriate `tool_failed` alarm). Escalate without
+            # raising a duplicate language alarm.
+            return None
+
+        retry_response, retry_call_id = retry_chat
+        retry_ratio, retry_count = _cjk_char_ratio(retry_response.text)
+        if (
+            retry_count >= _CJK_REJECT_MIN_COUNT
+            or retry_ratio >= _CJK_REJECT_MIN_RATIO
+        ):
+            # Two language violations in a row. Re-tag the second row and
+            # raise `output_schema_violation` with `error_kind='language_violation'`
+            # — language drift is a kind of output contract violation; we
+            # intentionally do NOT add a new alarm type for v1.
+            self._retag_llm_call(
+                retry_call_id,
+                "language_violation",
+                error_message=(
+                    f"CJK chars: {retry_count} ({retry_ratio:.2%});"
+                    " English-strict retry also failed."
+                ),
+            )
+            alarms.raise_output_schema_violation(
+                self._session_conn,
+                parse_error=(
+                    f"language_violation: response contained {retry_count}"
+                    f" CJK chars ({retry_ratio:.2%}); language retry also"
+                    " failed."
+                ),
+                repair_attempt=2,
+                raw_text_preview=retry_response.text[:_RAW_PREVIEW_MAX],
+                stage=ctx.stage,
+            )
+            return None
+
+        # Retry succeeded the CJK check — hand its response back to the
+        # parse pipeline. The row stays `ok` (parse may still re-tag it).
+        return retry_response, model_used, is_fallback, retry_call_id
 
     def _call_with_swap(
         self,
@@ -537,6 +662,47 @@ def _repair_message(parse_error: str) -> dict:
             " JSON object."
         ),
     }
+
+
+def _english_directive_message() -> dict:
+    """Build the single English-strict retry system message.
+
+    Sent as ``role='system'`` because it's a hard contract directive, not
+    user content. The orchestrator's stub-friendly message conversion in
+    `_to_api_messages` preserves the role verbatim.
+    """
+    return {"role": "system", "content": _ENGLISH_STRICT_DIRECTIVE}
+
+
+def _cjk_char_ratio(text: str) -> tuple[float, int]:
+    """Return ``(ratio, count)`` of CJK characters in ``text``.
+
+    Counts characters in the following Unicode blocks:
+      - CJK Unified Ideographs (U+4E00..U+9FFF) — common Chinese / Japanese kanji
+      - CJK Unified Ideographs Extension A (U+3400..U+4DBF)
+      - Hiragana (U+3040..U+309F)
+      - Katakana (U+30A0..U+30FF)
+      - Hangul Syllables (U+AC00..U+D7AF)
+
+    Ratio is ``count / len(text)`` (or 0.0 for empty text). The pair is
+    returned so callers can apply both an absolute floor (8 chars) and a
+    proportional floor (3%) — see `_CJK_REJECT_MIN_COUNT` /
+    `_CJK_REJECT_MIN_RATIO`.
+    """
+    if not text:
+        return 0.0, 0
+    count = 0
+    for ch in text:
+        cp = ord(ch)
+        if (
+            0x4E00 <= cp <= 0x9FFF
+            or 0x3400 <= cp <= 0x4DBF
+            or 0x3040 <= cp <= 0x309F
+            or 0x30A0 <= cp <= 0x30FF
+            or 0xAC00 <= cp <= 0xD7AF
+        ):
+            count += 1
+    return count / len(text), count
 
 
 class _ParseOk:

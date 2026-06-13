@@ -665,7 +665,14 @@ def _decode_alarm(row: sqlite3.Row) -> dict:
 #     do NOT try to merge them.
 
 _LLM_CALL_STATUSES: frozenset[str] = frozenset(
-    {"ok", "rate_limited", "transport_error", "parse_error", "repair_retry"}
+    {
+        "ok",
+        "rate_limited",
+        "transport_error",
+        "parse_error",
+        "repair_retry",
+        "language_violation",
+    }
 )
 
 
@@ -691,8 +698,8 @@ def record_llm_call(
 
     JSON-encodes ``request_messages`` and ``request_options``. Validates
     ``status`` against the closed set ``{ok, rate_limited, transport_error,
-    parse_error, repair_retry}`` so a typo can't quietly land in the table.
-    Returns the new row's id.
+    parse_error, repair_retry, language_violation}`` so a typo can't quietly
+    land in the table. Returns the new row's id.
     """
     if status not in _LLM_CALL_STATUSES:
         raise ValueError(

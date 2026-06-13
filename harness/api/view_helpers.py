@@ -516,10 +516,22 @@ def _render_approval_card(
     return body_html, body_plain
 
 
-def _render_business_brief_card(details: dict) -> tuple[str, str]:
-    """Render the ``business_brief`` approval card with hoisted name/tagline."""
+def _render_business_brief_card(
+    details: dict,
+    *,
+    heading: str = "Business Brief",
+    empty_prompt: str = "Approve the business brief above to proceed.",
+    plain_prefix: str = "Approval request: business_brief",
+) -> tuple[str, str]:
+    """Render a Business-Brief card with hoisted name/tagline.
+
+    Shared by ``request_approval(subject='business_brief')`` and
+    ``save_business_brief`` — the latter overrides ``heading`` (to
+    distinguish "save" from "approve" copy) and ``plain_prefix`` so the
+    text body the tests / debug surface reads naturally.
+    """
     parts: list[str] = ['<div class="approval-card">']
-    parts.append('<h3 class="approval-subject">Business Brief</h3>')
+    parts.append(f'<h3 class="approval-subject">{_esc(heading)}</h3>')
 
     name_val = details.get("name")
     tagline_val = details.get("tagline")
@@ -539,14 +551,12 @@ def _render_business_brief_card(details: dict) -> tuple[str, str]:
     elif not plain_extras:
         # Empty details — show a friendly prompt so the bubble isn't blank.
         parts.append(
-            '<p class="approval-prompt">'
-            "Approve the business brief above to proceed."
-            "</p>"
+            f'<p class="approval-prompt">{_esc(empty_prompt)}</p>'
         )
 
     parts.append("</div>")
     body_html = "".join(parts)
-    body_plain = "Approval request: business_brief"
+    body_plain = plain_prefix
     if plain_extras:
         body_plain = body_plain + " — " + " — ".join(plain_extras)
     return body_html, body_plain
@@ -794,6 +804,116 @@ def _latest_mockup_html(materials_by_id: dict[str, dict]) -> tuple[str, bool] | 
     return latest_html, latest_themed
 
 
+# ---------------------------------------------------------------------------
+# Tool-call bubble rendering — per-tool cards (no JSON ever shown)
+# ---------------------------------------------------------------------------
+
+# Maximum number of characters of file content shown in a ``write_file`` card's
+# collapsed ``<details>``. Larger files surface only the prefix plus a
+# "... (N more characters)" footer so the chat panel stays readable.
+_WRITE_FILE_PREVIEW_CHARS = 500
+
+
+def _render_save_brief_card(brief: dict) -> tuple[str, str]:
+    """Render the ``save_business_brief`` tool-call bubble.
+
+    Reuses the Business-Brief body-building helper with a distinct heading
+    ("Saving Business Brief") so users can tell the persist call apart
+    from an ``approve``-the-brief request. The plain body reports the
+    saved name (or "unnamed" for an unset name).
+    """
+    name_val = brief.get("name") if isinstance(brief, dict) else None
+    name_str = name_val if isinstance(name_val, str) and name_val else "unnamed"
+    body_html, _plain_unused = _render_business_brief_card(
+        brief if isinstance(brief, dict) else {},
+        heading="Saving Business Brief",
+        empty_prompt="Saving the business brief into session memory.",
+        plain_prefix=f"Saved Business Brief: {name_str}",
+    )
+    return body_html, f"Saved Business Brief: {name_str}"
+
+
+def _render_write_file_card(path: str, content: Any) -> tuple[str, str]:
+    """Render the ``write_file`` tool-call bubble.
+
+    Shows the path bolded with the size, and tucks the content into a
+    collapsed ``<details>`` (truncated to ``_WRITE_FILE_PREVIEW_CHARS``).
+    Long files won't blow up the chat panel; the user can still expand to
+    peek. Non-string content (defensive) is reported as zero bytes with
+    no preview.
+    """
+    content_str = content if isinstance(content, str) else ""
+    size = len(content_str)
+    plain = f"Wrote {path} ({size} bytes)"
+    parts: list[str] = ['<div class="tool-call-card tool-write-file">']
+    parts.append(
+        f'<div class="tool-call-summary">Wrote <code>{_esc(path)}</code> '
+        f"({size} bytes)</div>"
+    )
+    if content_str:
+        if size > _WRITE_FILE_PREVIEW_CHARS:
+            preview = content_str[:_WRITE_FILE_PREVIEW_CHARS]
+            footer = f"\n... ({size - _WRITE_FILE_PREVIEW_CHARS} more characters)"
+            preview_text = preview + footer
+        else:
+            preview_text = content_str
+        parts.append(
+            "<details class=\"tool-call-details\">"
+            "<summary>Show content</summary>"
+            f"<pre>{_esc(preview_text)}</pre>"
+            "</details>"
+        )
+    parts.append("</div>")
+    return "".join(parts), plain
+
+
+def _render_read_file_card(path: str) -> tuple[str, str]:
+    """Render the ``read_file`` tool-call bubble — just the path."""
+    plain = f"Read {path}"
+    body_html = (
+        '<div class="tool-call-card tool-read-file">'
+        f'<div class="tool-call-summary">Read <code>{_esc(path)}</code></div>'
+        "</div>"
+    )
+    return body_html, plain
+
+
+def _render_list_files_card(path: str) -> tuple[str, str]:
+    """Render the ``list_files`` tool-call bubble — just the path."""
+    plain = f"Listed files under {path}"
+    body_html = (
+        '<div class="tool-call-card tool-list-files">'
+        '<div class="tool-call-summary">Listed files under '
+        f"<code>{_esc(path)}</code></div>"
+        "</div>"
+    )
+    return body_html, plain
+
+
+def _render_generic_tool_call_card(tool_name: str, args: dict) -> tuple[str, str]:
+    """Fallback renderer for any tool without an explicit branch.
+
+    Produces a semantic card with the tool name as a heading (title-cased,
+    underscores → spaces) and a labeled list of args — the same
+    ``<dl class="brief-rows">`` shape the approval card uses, but with no
+    special-case field handling. NEVER emits a JSON blob. New tools
+    surface cleanly without a code change.
+    """
+    heading = _humanize_key(tool_name) if tool_name else "Tool Call"
+    parts: list[str] = ['<div class="tool-call-card">']
+    parts.append(
+        f'<h3 class="tool-call-heading">{_esc(heading)}</h3>'
+    )
+    args_dict = args if isinstance(args, dict) else {}
+    rows_html = _render_brief_rows(args_dict, label_map={})
+    if rows_html:
+        parts.append(rows_html)
+    parts.append("</div>")
+    body_html = "".join(parts)
+    body_plain = f"Call {tool_name}" if tool_name else "Tool call"
+    return body_html, body_plain
+
+
 def _tool_call_body(
     tool: str, args: dict, materials_by_id: dict[str, dict] | None = None
 ) -> tuple[str, dict, bool]:
@@ -805,6 +925,12 @@ def _tool_call_body(
     ``False`` means the body is an internal summary string we constructed
     here (e.g. ``"Wrote index.html (1234 bytes)"``) — those are already
     formatted, so they should only be HTML-escaped, not re-rendered.
+
+    Most tools emit a pre-rendered HTML override on ``meta["body_html"]``
+    so the chat bubble never shows raw JSON — see ``_render_*_card`` for
+    the per-tool layouts. The generic fallback (``_render_generic_tool_call_card``)
+    handles any future tool with no explicit branch, so the chat panel
+    stays JSON-free by construction.
     """
     if tool == "ask_user":
         body = args.get("question") or ""
@@ -824,6 +950,11 @@ def _tool_call_body(
         # leaks into the conversation entry's user-facing ``meta`` dict.
         meta_out: dict[str, Any] = {"body_html": card_html}
         return card_plain, meta_out, False
+    if tool == "save_business_brief":
+        brief_raw = args.get("brief")
+        brief = brief_raw if isinstance(brief_raw, dict) else {}
+        card_html, card_plain = _render_save_brief_card(brief)
+        return card_plain, {"body_html": card_html}, False
     if tool == "render_mockup":
         layout = _as_dict(args.get("layout_spec"))
         sections_raw = layout.get("sections")
@@ -868,16 +999,20 @@ def _tool_call_body(
     if tool == "write_file":
         path = args.get("path", "?")
         content = args.get("content")
-        size = len(content) if isinstance(content, str) else 0
-        return f"Wrote {path} ({size} bytes)", {}, False
+        card_html, plain = _render_write_file_card(str(path), content)
+        return plain, {"body_html": card_html}, False
     if tool == "read_file":
         path = args.get("path", "?")
-        return f"Read {path}", {}, False
+        card_html, plain = _render_read_file_card(str(path))
+        return plain, {"body_html": card_html}, False
     if tool == "list_files":
         path = args.get("path", ".")
-        return f"Listed files under {path}", {}, False
-    # Unknown tool: render the tool name + a short args excerpt.
-    return f"Call {tool} {_json_excerpt(args, 60)}", {}, False
+        card_html, plain = _render_list_files_card(str(path))
+        return plain, {"body_html": card_html}, False
+    # Unknown tool: build a semantic card with the tool name + labeled args.
+    # NEVER fall through to a JSON dump — every tool gets a labeled bubble.
+    card_html, plain = _render_generic_tool_call_card(tool, args)
+    return plain, {"body_html": card_html}, False
 
 
 # ---------------------------------------------------------------------------

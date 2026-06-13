@@ -536,6 +536,31 @@ def test_record_llm_call_rejects_invalid_status(tmp_session):
         )
 
 
+def test_record_llm_call_accepts_language_violation_status(tmp_session):
+    """The closed status set includes `language_violation` so the language-drift
+    guardrail in LLMWorker can record CJK-flagged calls in the audit log."""
+    _, session_conn, _ = tmp_session
+    cid = store.record_llm_call(
+        session_conn,
+        model="deepseek/deepseek-v4-flash:free",
+        is_fallback=False,
+        request_messages=_sample_messages(),
+        request_options=_sample_options(),
+        response_text="你好世界",
+        finish_reason=None,
+        tokens_in=5,
+        tokens_out=4,
+        cost_usd=0.0,
+        status="language_violation",
+        error_message="CJK chars: 4 (100.00%)",
+    )
+    rows = store.load_llm_calls(session_conn)
+    assert len(rows) == 1
+    assert rows[0]["id"] == cid
+    assert rows[0]["status"] == "language_violation"
+    assert rows[0]["error_message"] == "CJK chars: 4 (100.00%)"
+
+
 def test_record_llm_call_fk_enforced(tmp_session):
     _, session_conn, _ = tmp_session
     bogus = new_id()

@@ -679,13 +679,16 @@ class TestMarkdownRendering:
         ]
         msgs = view_helpers.build_conversation(events, {})
         # Internal summary string — must not be wrapped in a <p> by markdown
-        # and must not contain rendered markdown elements.
+        # and must not contain rendered markdown elements. The plain body is
+        # the one-line summary that tests/debug consume.
         assert msgs[0]["body"] == "Wrote index.html (7 bytes)"
-        # body_html is HTML-escaped plain text — no <p> wrapping, no <strong>.
-        assert "<p>" not in msgs[0]["body_html"]
+        # body_html is the pre-rendered tool-call card — no markdown <p>
+        # wrapping, no <strong>. Path appears in a <code>, byte count appears
+        # in the summary line, content sits in a collapsed <details>.
         assert "<strong>" not in msgs[0]["body_html"]
-        # And the visible text matches the body.
-        assert "Wrote index.html (7 bytes)" in msgs[0]["body_html"]
+        assert "tool-call-card" in msgs[0]["body_html"]
+        assert "<code>index.html</code>" in msgs[0]["body_html"]
+        assert "(7 bytes)" in msgs[0]["body_html"]
 
     def test_markdown_render_escapes_embedded_html(self) -> None:
         """LLM output is untrusted — a `<script>` token in the body MUST NOT
@@ -911,6 +914,184 @@ class TestApprovalCardRendering:
             assert 'class="approval-prompt"' in body_html
             # No crash, no JSON.
             assert "<pre>" not in body_html
+
+
+# ---------------------------------------------------------------------------
+# Per-tool tool_call bubble rendering — no JSON ever shown
+# ---------------------------------------------------------------------------
+
+
+class TestToolCallBubbleRendering:
+    """Every ``tool_call`` envelope must produce a semantic bubble — never a
+    JSON dump. ``save_business_brief`` reuses the Business-Brief card layout
+    with a "Saving" heading; ``write_file`` is a compact card with the
+    content tucked into a collapsed ``<details>``; ``read_file`` /
+    ``list_files`` are one-liners; and any unknown tool falls back to a
+    labeled-list generic card.
+    """
+
+    @staticmethod
+    def _tool_call(tool: str, args: dict) -> list[dict]:
+        return [
+            _event(
+                "worker_output",
+                {
+                    "envelope": {
+                        "type": "tool_call",
+                        "tool": tool,
+                        "args": args,
+                    }
+                },
+            )
+        ]
+
+    def test_save_business_brief_bubble_renders_as_card(self) -> None:
+        brief = {
+            "name": "Jerry's HVAC",
+            "industry": "Home service",
+            "palette": {"primary": "#1e40af", "secondary": "#ffffff"},
+            "pages": ["Home", "Services"],
+        }
+        events = self._tool_call("save_business_brief", {"brief": brief})
+        msgs = view_helpers.build_conversation(events, {})
+        body_html = msgs[0]["body_html"]
+        # Heading distinguishes save from approve.
+        assert '<h3 class="approval-subject">Saving Business Brief</h3>' in body_html
+        # Brief name (escaped — apostrophe encoded).
+        assert "Jerry&#x27;s HVAC" in body_html
+        # Brief-rows definition list with at least one labeled row.
+        assert '<dl class="brief-rows">' in body_html
+        assert "<dt>Industry</dt><dd>Home service</dd>" in body_html
+        assert "<dt>Pages</dt><dd>Home, Services</dd>" in body_html
+        # Palette swatch with the primary color.
+        assert 'style="background:#1e40af"' in body_html
+        assert "<code>#1e40af</code>" in body_html
+        # No JSON dump anywhere.
+        assert "<pre>" not in body_html
+        assert '{"' not in body_html
+        assert '"brief":' not in body_html
+        # Plain body reports the saved name.
+        assert msgs[0]["body"] == "Saved Business Brief: Jerry's HVAC"
+
+    def test_save_business_brief_unnamed_brief_still_renders(self) -> None:
+        """A brief without ``name`` still renders the card and reports
+        ``unnamed`` in the plain body so tests / debug get a stable string.
+        """
+        events = self._tool_call(
+            "save_business_brief", {"brief": {"industry": "Construction"}}
+        )
+        msgs = view_helpers.build_conversation(events, {})
+        assert msgs[0]["body"] == "Saved Business Brief: unnamed"
+        assert (
+            '<h3 class="approval-subject">Saving Business Brief</h3>'
+            in msgs[0]["body_html"]
+        )
+
+    def test_save_business_brief_escapes_user_content(self) -> None:
+        """User-supplied values (here a name) must be HTML-escaped — a
+        ``<script>`` token cannot survive as a live tag in body_html.
+        """
+        events = self._tool_call(
+            "save_business_brief",
+            {"brief": {"name": "<script>alert(1)</script>"}},
+        )
+        msgs = view_helpers.build_conversation(events, {})
+        body_html = msgs[0]["body_html"]
+        assert "<script>" not in body_html
+        assert "&lt;script&gt;" in body_html
+        # Plain body carries the raw name; that's fine because tests/debug
+        # don't render it as HTML.
+        assert "Saved Business Brief: <script>alert(1)</script>" == msgs[0]["body"]
+
+    def test_write_file_bubble_compact_with_collapsed_content(self) -> None:
+        long_content = "<html>...</html>" * 100  # 1600 chars > 500 truncation
+        events = self._tool_call(
+            "write_file", {"path": "index.html", "content": long_content}
+        )
+        msgs = view_helpers.build_conversation(events, {})
+        body_html = msgs[0]["body_html"]
+        # Path is bolded via <code> and byte count appears in the summary line.
+        assert "<code>index.html</code>" in body_html
+        assert f"({len(long_content)} bytes)" in body_html
+        # The content is tucked into a collapsed <details>.
+        assert "<details" in body_html
+        assert "<summary>Show content</summary>" in body_html
+        # Full content is NOT inlined — only the first 500 chars are shown,
+        # followed by a "... (N more characters)" footer (all escaped).
+        assert long_content not in body_html
+        assert "more characters)" in body_html
+        # The pre block shows escaped HTML, not live HTML.
+        assert "&lt;html&gt;" in body_html
+        # Plain body summary.
+        assert msgs[0]["body"] == f"Wrote index.html ({len(long_content)} bytes)"
+
+    def test_write_file_short_content_inlined_without_truncation_footer(self) -> None:
+        events = self._tool_call(
+            "write_file", {"path": "small.txt", "content": "hello"}
+        )
+        msgs = view_helpers.build_conversation(events, {})
+        body_html = msgs[0]["body_html"]
+        # Whole content fits — no truncation footer.
+        assert "more characters)" not in body_html
+        # Content is present, escaped (no HTML special chars here so just text).
+        assert "hello" in body_html
+
+    def test_read_file_bubble_compact(self) -> None:
+        events = self._tool_call("read_file", {"path": "src/index.html"})
+        msgs = view_helpers.build_conversation(events, {})
+        body_html = msgs[0]["body_html"]
+        assert "tool-read-file" in body_html
+        assert "Read <code>src/index.html</code>" in body_html
+        # No JSON.
+        assert "<pre>" not in body_html
+        assert '{"' not in body_html
+        assert msgs[0]["body"] == "Read src/index.html"
+
+    def test_list_files_bubble_compact(self) -> None:
+        events = self._tool_call("list_files", {"path": "src"})
+        msgs = view_helpers.build_conversation(events, {})
+        body_html = msgs[0]["body_html"]
+        assert "Listed files under <code>src</code>" in body_html
+        assert "<pre>" not in body_html
+        assert '{"' not in body_html
+        assert msgs[0]["body"] == "Listed files under src"
+
+    def test_list_files_default_path_when_unset(self) -> None:
+        """Omitting ``path`` falls back to ``.`` (the sandbox root)."""
+        events = self._tool_call("list_files", {})
+        msgs = view_helpers.build_conversation(events, {})
+        assert "Listed files under <code>.</code>" in msgs[0]["body_html"]
+        assert msgs[0]["body"] == "Listed files under ."
+
+    def test_generic_tool_call_renders_card_not_json(self) -> None:
+        """A fictional tool with no explicit branch must still render a
+        semantic card — heading + labeled rows — not a JSON blob.
+        """
+        events = self._tool_call("do_thing", {"a": 1, "b": "two"})
+        msgs = view_helpers.build_conversation(events, {})
+        body_html = msgs[0]["body_html"]
+        # Heading is title-cased (underscores → spaces, then Title Case).
+        assert '<h3 class="tool-call-heading">Do Thing</h3>' in body_html
+        # Labeled rows for each arg.
+        assert "<dt>A</dt><dd>1</dd>" in body_html
+        assert "<dt>B</dt><dd>two</dd>" in body_html
+        # No JSON shape — neither raw braces nor JSON-style keys.
+        assert "{" not in body_html
+        assert '"a":' not in body_html
+        assert "<pre>" not in body_html
+        # Plain body reports the call but stays JSON-free.
+        assert msgs[0]["body"] == "Call do_thing"
+        assert "{" not in msgs[0]["body"]
+
+    def test_generic_tool_call_escapes_arg_values(self) -> None:
+        """Generic-card arg values must be HTML-escaped before insertion."""
+        events = self._tool_call(
+            "future_tool", {"payload": "<script>alert(1)</script>"}
+        )
+        msgs = view_helpers.build_conversation(events, {})
+        body_html = msgs[0]["body_html"]
+        assert "<script>" not in body_html
+        assert "&lt;script&gt;" in body_html
 
 
 # ---------------------------------------------------------------------------

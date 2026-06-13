@@ -735,6 +735,193 @@ def test_spend_log_and_llm_calls_both_written_on_success(tmp_path: Path) -> None
 
 
 # ---------------------------------------------------------------------------
+# 8. Language-drift guardrail — CJK detection + English-strict one-shot retry
+# ---------------------------------------------------------------------------
+
+
+# 30 Chinese characters — easily clears the count >= 8 floor and the 3% ratio.
+_CJK_BODY = "你好世界这是一个测试响应包含很多中文字符用于测试语言漂移防护机制"
+
+
+def test_cjk_response_triggers_language_retry_then_success(tmp_path: Path) -> None:
+    """A heavy-CJK first response triggers ONE English-strict retry; on
+    English success the envelope returns and no alarm is raised. Audit log
+    shows the first row tagged `language_violation`, the second `ok`."""
+    stub = StubLLMClient(
+        [
+            _chat_response(_CJK_BODY),
+            _chat_response(_valid_toolcall_json()),
+        ]
+    )
+    worker, core_conn, session_conn, _ = _build_worker(
+        tmp_path=tmp_path, stub=stub
+    )
+    try:
+        result = worker.act(_make_ctx("sid"))
+
+        assert isinstance(result, ToolCall)
+        assert result.tool == "ask_user"
+
+        rows = _load_llm_call_rows(session_conn)
+        assert len(rows) == 2
+        assert rows[0]["status"] == "language_violation"
+        assert rows[0]["response_text"] == _CJK_BODY
+        assert rows[0]["error_message"] is not None
+        assert "CJK" in rows[0]["error_message"]
+        assert rows[1]["status"] == "ok"
+        assert rows[1]["response_text"] == _valid_toolcall_json()
+
+        # Both calls succeeded transport-side → both billed.
+        assert len(_load_spend_rows(core_conn)) == 2
+
+        # No alarms on successful language retry.
+        assert store.load_alarms(session_conn) == []
+    finally:
+        session_conn.close()
+        core_conn.close()
+
+
+def test_cjk_response_retry_also_cjk_escalates(tmp_path: Path) -> None:
+    """Two heavy-CJK responses in a row: terminal language violation. Both
+    rows logged `language_violation`; one `output_schema_violation` alarm
+    raised with `error_kind='language_violation'` semantics; worker returns
+    Escalate."""
+    stub = StubLLMClient(
+        [
+            _chat_response(_CJK_BODY),
+            _chat_response(_CJK_BODY + "再来一次"),
+        ]
+    )
+    worker, core_conn, session_conn, _ = _build_worker(
+        tmp_path=tmp_path, stub=stub
+    )
+    try:
+        result = worker.act(_make_ctx("sid"))
+
+        assert isinstance(result, Escalate)
+        assert "language" in result.reason.lower()
+
+        rows = _load_llm_call_rows(session_conn)
+        assert len(rows) == 2
+        assert rows[0]["status"] == "language_violation"
+        assert rows[1]["status"] == "language_violation"
+        assert rows[1]["error_message"] is not None
+        assert "English-strict retry" in rows[1]["error_message"]
+
+        alarms_rows = store.load_alarms(session_conn)
+        assert len(alarms_rows) == 1
+        alarm = alarms_rows[0]
+        assert alarm["type"] == AlarmType.OUTPUT_SCHEMA_VIOLATION.value
+        # repair_attempt=2 marks "two attempts (original + retry) both failed."
+        assert alarm["context"]["repair_attempt"] == 2
+        assert "language_violation" in alarm["context"]["parse_error"]
+        # Raw preview contains CJK from the retry response.
+        assert any(
+            "一" <= ch <= "鿿"
+            for ch in alarm["context"]["raw_text_preview"]
+        )
+    finally:
+        session_conn.close()
+        core_conn.close()
+
+
+def test_short_response_with_few_cjk_chars_does_not_trigger(tmp_path: Path) -> None:
+    """A valid envelope that incidentally quotes a Chinese business name
+    (4 CJK chars in a ~200-char response: count<8 AND ratio<3%) must NOT
+    trigger the language retry. One row, status `ok`."""
+    envelope = json.dumps(
+        {
+            "type": "tool_call",
+            "tool": "save_business_brief",
+            "args": {
+                "brief": {
+                    "name": "海底捞 Bistro",
+                    "industry": "restaurant",
+                    "tagline": "Authentic hot pot in the city center.",
+                    "primary_cta": "Reserve a table for the weekend.",
+                }
+            },
+        }
+    )
+    # Sanity: this envelope must have <8 CJK chars AND < 3% ratio for the
+    # test to be meaningful. The fixture is hand-tuned to land there.
+    cjk = sum(1 for ch in envelope if "一" <= ch <= "鿿")
+    assert cjk < 8
+    assert cjk / len(envelope) < 0.03
+
+    stub = StubLLMClient([_chat_response(envelope)])
+    worker, core_conn, session_conn, _ = _build_worker(
+        tmp_path=tmp_path, stub=stub
+    )
+    try:
+        result = worker.act(_make_ctx("sid"))
+        assert isinstance(result, ToolCall)
+
+        rows = _load_llm_call_rows(session_conn)
+        assert len(rows) == 1
+        assert rows[0]["status"] == "ok"
+        # No retry call.
+        assert len(stub.calls) == 1
+        assert store.load_alarms(session_conn) == []
+    finally:
+        session_conn.close()
+        core_conn.close()
+
+
+def test_cjk_check_runs_before_parse(tmp_path: Path) -> None:
+    """A CJK response (which would also fail envelope parse) is recorded as
+    `language_violation`, NOT `parse_error`. The two failure modes stay
+    distinct in the audit log."""
+    stub = StubLLMClient(
+        [
+            _chat_response(_CJK_BODY),  # also not valid JSON
+            _chat_response(_valid_final_json()),
+        ]
+    )
+    worker, core_conn, session_conn, _ = _build_worker(
+        tmp_path=tmp_path, stub=stub
+    )
+    try:
+        result = worker.act(_make_ctx("sid"))
+        assert isinstance(result, Final)
+
+        rows = _load_llm_call_rows(session_conn)
+        assert len(rows) == 2
+        # First row MUST be language_violation, never parse_error / repair_retry.
+        assert rows[0]["status"] == "language_violation"
+        assert rows[0]["status"] != "parse_error"
+        assert rows[0]["status"] != "repair_retry"
+    finally:
+        session_conn.close()
+        core_conn.close()
+
+
+def test_language_retry_appends_english_directive(tmp_path: Path) -> None:
+    """The retry call's messages must include an instruction to reply in
+    English. Asserted as a case-insensitive substring search across all
+    message contents."""
+    stub = StubLLMClient(
+        [
+            _chat_response(_CJK_BODY),
+            _chat_response(_valid_toolcall_json()),
+        ]
+    )
+    worker, core_conn, session_conn, _ = _build_worker(
+        tmp_path=tmp_path, stub=stub
+    )
+    try:
+        worker.act(_make_ctx("sid"))
+
+        assert len(stub.calls) == 2
+        retry_messages = stub.calls[1]["messages"]
+        joined = " ".join(m["content"] for m in retry_messages)
+        assert "ENGLISH ONLY" in joined.upper()
+    finally:
+        session_conn.close()
+        core_conn.close()
+
+
+# ---------------------------------------------------------------------------
 # Live test — opt-in only, gated by -m live + OPENROUTER_API_KEY.
 # ---------------------------------------------------------------------------
 

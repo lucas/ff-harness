@@ -707,6 +707,52 @@ def test_session_view_renders_mockup_iframe(make_test_app):
 
 
 # ---------------------------------------------------------------------------
+# 18b. save_business_brief chat bubble renders the brief as a labeled card
+# ---------------------------------------------------------------------------
+
+
+def test_session_view_save_business_brief_renders_card(make_test_app):
+    """End-to-end: a save_business_brief tool_call must produce a chat bubble
+    containing the labeled approval-card markup (heading + brief-name +
+    brief-rows) — NOT a JSON dump of the brief dict. The card is the same
+    layout as the request_approval brief card with a "Saving" heading so
+    the user can tell the persist call apart from an approve request.
+    """
+    brief = {
+        "name": "Jerry's HVAC",
+        "industry": "Home service",
+        "pages": ["Home", "Services"],
+    }
+    responses: list[ToolCall | Final | Escalate] = [
+        ToolCall(tool="save_business_brief", args={"brief": brief}),
+        Final(summary="brief saved"),
+    ]
+    client, _ = make_test_app(responses)
+    sid = _create_session(client)
+    r = client.post(f"/sessions/{sid}/resume", json={})
+    assert r.status_code == 200
+    assert r.json()["status"] == "completed"
+
+    r = client.get(f"/sessions/{sid}/view")
+    assert r.status_code == 200
+    body = r.text
+
+    chat_start = body.find('id="chat-log"')
+    chat_end = body.find('id="chat-input"', chat_start)
+    chat_section = body[chat_start:chat_end]
+
+    # Card markup is present with the "Saving" heading.
+    assert '<div class="approval-card">' in chat_section
+    assert '<h3 class="approval-subject">Saving Business Brief</h3>' in chat_section
+    assert "<dt>Industry</dt>" in chat_section
+    assert "Home service" in chat_section
+    # No raw JSON dump of the brief in the chat panel.
+    assert "<pre>" not in chat_section
+    assert '"brief":' not in chat_section
+    assert '{"name":' not in chat_section
+
+
+# ---------------------------------------------------------------------------
 # 19. Events table renders a Rewind button on awaiting_human rows only
 # ---------------------------------------------------------------------------
 
