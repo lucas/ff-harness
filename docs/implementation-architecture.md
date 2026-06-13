@@ -1,12 +1,13 @@
 # Implementation Architecture
 
-How we will build the harness. The spec/design context lives in `harness.md` (do not edit — it's the document we follow); the challenge brief and requirements live in `mission.md`. This file tracks implementation decisions only.
+How we will build the harness. A 500-word high-level summary lives in `overview.md`; the spec/design context lives in `harness.md` (do not edit — it's the document we follow); the challenge brief and requirements live in `mission.md`. This file tracks implementation decisions only.
 
 **Design priorities (in order):** durability (state survives crashes), resilience (keeps working despite failures), simplicity. Language: **Python**. The harness is the focus; the agent/worker is a thin pluggable thing at the edge.
 
 ## Decision status
-- **Settled:** Python; durability/resilience-first; simple/single-process; staged-pipeline execution; two-tier SQLite storage; swappable worker behind a minimal protocol; declared per-domain bundle (guardrails + tools + skills + checkpoints); loop-approval gate at 10 iterations; tool registry + dispatch choke point; skill registry; OpenRouter LLM client (configurable model, default free Nemotron, $1/day spend cap); context compaction; sub-agents with isolated sessions; full event + cost logging.
-- **Open / deprioritized:** the agent's domain and the real demo input (harness-first for now); deploy target (must support a persistent volume — see below).
+- **Settled:** Python; durability/resilience-first; simple/single-process; staged-pipeline execution; two-tier SQLite storage; swappable worker behind a minimal protocol; declared per-domain bundle (guardrails + tools + skills + checkpoints); loop-approval gate at 10 iterations; tool registry + dispatch choke point; skill registry; OpenRouter LLM client (configurable model, default free Nemotron, $1/day spend cap); context compaction; sub-agents with isolated sessions; full event + cost logging; tiered verification (deterministic → independent verifier sub-agent → human) + harness self-testing; strict JSON worker-output envelope validated with Pydantic; FastAPI-in-Docker deploy with bind-mounted SQLite volume and HTML/JS/CSS landing page.
+- **Settled (demo domain):** a **website builder for non-technical users** — clarify intent → confirm an ASCII mockup → generate SEO-optimized HTML+CSS+JS (+ `sitemap.xml` each iteration), auto-committed to a local git repo. See *Demo domain* below.
+- **Open:** none — architecture complete; next deliverable is the 1-page planning document (due Friday June 12, 11:30 PM).
 
 ## Core stance
 The harness is a **durable, resumable run orchestrator**. It drives a worker through a sequence of stages, wraps every step in the four pillars, and persists enough state that any run can be **resumed after a crash** and **replayed from any checkpoint**. The worker is untrusted and interchangeable.
@@ -14,6 +15,14 @@ The harness is a **durable, resumable run orchestrator**. It drives a worker thr
 > The run is a durable state machine; the worker is a function the state machine calls.
 
 The orchestrator, store, and four pillars are **domain-agnostic core**. What makes a given agent is a **declared per-domain bundle** — its guardrails, tools, skills, and checkpoints. Swapping that bundle (and the worker) yields a new agent with no changes to the core. The three configurable layers are distinct by intent: **guardrails constrain** (enforced), **tools empower** (callable), **skills guide** (advisory context).
+
+## Demo domain — website builder (non-technical users)
+The real input the harness runs on at demo time, and a concrete instance of the per-domain bundle. A user submits a basic idea or change; the harness clarifies intent, confirms layout via an ASCII mockup, then generates a simple, **SEO-optimized** HTML+CSS+JS page and regenerates `sitemap.xml` after each iteration — every change auto-committed to a local git repo for versioning.
+- **Tools:** ask the user a question, render an ASCII mockup, write/update page files, regenerate `sitemap.xml`, git commit.
+- **Skills:** clarifying-question technique + simple web-design & SEO guidance.
+- **Checkpoints:** intent clarified; ASCII mockup confirmed by the user; generated HTML/CSS/JS valid; **SEO checks pass** (title, meta description, semantic tags, Open Graph) and `sitemap.xml` regenerated & valid — all deterministic Tier 1.
+- **HITL:** the clarifying questions and mockup confirmation are the natural `awaiting_human` escalation points — the harness stops and asks rather than guessing (the PRD's stop-and-ask Should).
+- **Versioning:** automatic local git commits give a durable, revertable history of generated artifacts, complementing the event log.
 
 ## Two-tier storage (control plane + data plane)
 A small core DB indexes users and sessions; each session's run context lives in its own DB so the core never bloats and a session is a portable, isolated unit.
@@ -67,12 +76,22 @@ Pillar definitions and the PRD-vs-deck mapping are in `harness.md`. Implementati
 | Pillar | Component | Serves |
 |---|---|---|
 | Guardrails | `guardrails.py` — registry of declared policies (caps, tool allow-list, input/output validation) checked at fixed interception points; returns allow/deny/modify | Resilience |
-| Checkpoints | `checkpoints.py` — named gates with explicit pass/fail criteria → persisted result | Durability + resilience |
-| Material handling | `material.py` — typed input/output ports; validate on ingress/egress; serialize to the session store | Durability + resilience |
+| Checkpoints | `checkpoints.py` — named gates with explicit pass/fail criteria, run as a tiered verification ladder → persisted result | Durability + resilience |
+| Material handling | `material.py` — typed input/output ports (incl. the JSON output envelope); validate on ingress/egress; serialize to the session store | Durability + resilience |
 | Alarms | `alarms.py` — named types, severity, context, recommended action; routed to handlers (log / escalate / halt) | Resilience |
 
 ## Swappable worker boundary
 A minimal protocol — `Worker.act(context) -> result` — is the entire surface the harness knows. Any agent (Claude, another model, a mock) implements it; dropping one in requires no harness changes (the swappable-agent Should and the portability Bonus).
+
+## Worker output contract (strict JSON envelope)
+Every worker turn must return one JSON object, discriminated on `type` — the entire contract, kept deliberately tiny:
+- `{ "type": "tool_call", "tool": <name>, "args": { ... } }`
+- `{ "type": "final", "result": <string or object> }`
+- `{ "type": "escalate", "reason": <why a human is needed> }`
+
+Validated with **Pydantic** (already in the FastAPI stack — no new dependency). Per turn: parse JSON → validate the envelope → if `tool_call`, validate `args` against that tool's registered parameter schema (reuses the tool registry) → dispatch on `type`. Validation failure is **fail-as-data**: a bounded "repair" retry feeds the error back to the model; if it still fails, raise `output_schema_violation` and escalate/halt.
+
+Enforcement prefers OpenRouter's structured output (`response_format` json_schema) when the model supports it, else system-prompt-instructed JSON + validate + repair (the free Nemotron will likely need the fallback). This keeps the loop *call → validate → dispatch* and yields the cheapest deterministic verification gate for free.
 
 ## Tools (capabilities the agent can call)
 A declared **tool registry**. Each tool: `name`, `description` (what the model reads to decide), typed `parameter schema`, `executor` (the real function), and a `result contract` (parseable output; errors returned as structured data, never crashes). Per-tool metadata: allow-list membership, `requires_approval`, timeout, max_retries, idempotent.
@@ -106,6 +125,20 @@ A sub-agent is the **same harness loop running in its own session** (`sessions/{
 - Resilience: a sub-agent failure returns to the parent as structured data (fail-as-data); the parent decides. Recursion depth is bounded by a declared `max_subagent_depth` guardrail; the daily spend cap is global across the whole session tree.
 - `subagent.py` owns spawn/await; each sub-agent can carry its own skills/tools/worker.
 
+## Verification strategy
+Two tracks: confirming the worker's output (A) and confirming the harness itself (B).
+
+**Track A — output verification (tiered, confidence-gated).** A checkpoint runs tiers in order, stopping as soon as one can decide; cost rises with tier.
+1. **Deterministic oracles (free, first):** JSON-envelope validity, tests, type-check/LSP, lint, schema/format, declared invariants. Most gates resolve here at $0.
+2. **Independent verifier sub-agent (semantic gates only):** spawned via `subagent.py` in its own session, ideally a *different model* than the worker (external verification beats self-correction). Bias mitigations: explicit pass/fail rubric, required cited evidence, low temperature, randomized/masked order, verbosity penalty. Gated by the spend ceiling — skipped + alarmed if the cap would be exceeded.
+3. **Human escalation:** on low verifier confidence or high-stakes gates, via the existing `awaiting_human` path.
+
+Every tier's verdict + evidence persists as a `CheckpointResult`; failures raise alarms.
+
+**Track B — harness self-testing.** Leverages the append-only event log: a **mock deterministic worker** (no LLM/cost), **replay/golden-run tests** (re-run a recorded session, assert identical state), **fault-injection** (kill mid-run, resume, assert consistency + no double-applied effects), and **property/idempotency tests** on the state machine. Optional statistical-significance gating for agent-quality deltas (don't ship on noise).
+
+`verification.py` holds the deterministic verifiers + the verifier-sub-agent driver; `checkpoints.py` orchestrates the tier ladder; a `verification` skill guides the verifier sub-agent; `tests/` holds the Track B suite.
+
 ## Logging & observability
 The `events` log is also the audit trail — we log thoroughly, structured, per session:
 
@@ -116,21 +149,29 @@ The `events` log is also the audit trail — we log thoroughly, structured, per 
 
 Cost is recorded per call in `events` (full detail) and mirrored to the core `spend_log` (lightweight, cross-session) so the daily spend guardrail is a single query. Secrets are redacted; logging captures full payloads (durability) even though the live context is compacted.
 
-**Named alarm types so far:** `iteration_limit_reached`, `spend_cap_reached`, `tool_failed`, `checkpoint_failed_repeatedly`, `max_subagent_depth_exceeded`, `subagent_failed`, `compaction_stalled` — each with severity, context, and recommended action.
+**Named alarm types so far:** `iteration_limit_reached`, `spend_cap_reached`, `tool_failed`, `checkpoint_failed_repeatedly`, `output_schema_violation`, `verification_failed`, `verifier_low_confidence`, `verifier_disagreement`, `max_subagent_depth_exceeded`, `subagent_failed`, `compaction_stalled` — each with severity, context, and recommended action.
 
 ## Module layout
 ```
+app.py              # FastAPI: harness HTTP API + static serving
+static/             # landing page (HTML/JS/CSS, no build) — HITL + observability surface
+Dockerfile
+docker-compose.yml  # bind-mount host folder → SQLite data
+data/               # host bind-mount target: harness.db + sessions/
+skills/             # skill markdown (incl. the verification skill)
+tests/              # mock worker, replay/golden runs, fault-injection, property tests
 harness/
   orchestrator.py   # the engine: resume run, drive stages, bounded loop
   store/
     core.py         # users + sessions index (control plane)
     session.py      # per-session DB: events, checkpoints, material, alarms (data plane)
   guardrails.py     # declared policies + interception points
-  checkpoints.py    # gate definitions, evaluation, results
-  material.py       # typed I/O ports, validation
+  checkpoints.py    # gate definitions, tier orchestration, results
+  material.py       # typed I/O ports, validation, JSON output envelope
   alarms.py         # alarm types, severity, recommended actions, routing
   tools.py          # tool registry + dispatch choke point (allow-listed, validated)
   skills.py         # skill registry + relevance loading (advisory guidance)
+  verification.py   # deterministic verifiers + verifier-sub-agent driver
   llm.py            # provider-agnostic LLM client; OpenRouter impl; returns usage + cost
   context.py        # context-window manager + compaction (continue past the hard limit)
   subagent.py       # spawn/await nested sessions (own DB, fresh context)
@@ -140,5 +181,7 @@ harness/
 
 **Engine in one breath:** load-or-resume run → for each stage from the resume point → guardrails pre-check → run stage with retries/timeout/fail-as-data (compact context near the limit; pause for human approval every 10 iterations) → guardrails post-check → checkpoint evaluate → persist result → on fail: alarm + (retry | escalate | halt); on pass: advance.
 
-## Deployment durability requirement
-`harness.db` and `sessions/` must live on a **persistent volume**, not an ephemeral container filesystem — a redeploy/restart must not wipe durable state. This rules out serverless and points the deploy decision toward a host with attached volumes (e.g. Fly/Render volume).
+## Deployment
+A single **FastAPI app in a Docker container** serves both the harness HTTP API and a static landing page. A **host folder is bind-mounted** into the container; `harness.db` and `sessions/` point at the mounted path, so rebuilds/redeploys never wipe durable state and the container stays disposable.
+- SQLite-on-volume: keep **WAL** on (WAL/SHM sidecars sit beside each `.db` on the same volume); the single-process orchestrator + one writer per session DB avoid contention; file locking is solid on a Linux host volume but can be flaky on macOS Docker Desktop bind mounts (local-dev caveat).
+- The **landing page** (basic HTML/JS/CSS, no build step) doubles as the **HITL + observability surface**: session list/status, `awaiting_human` escalations with alarm context, approve/deny actions that drive resume, and a run/cost view from `events` + `spend_log`.

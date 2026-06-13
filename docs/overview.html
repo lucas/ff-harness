@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Harness — Overview</title>
+<style>
+  :root {
+    --ink: #1a1a1a;
+    --muted: #555;
+    --accent: #0b5cad;
+    --code-bg: #f0f2f5;
+    --rule: #d9dde2;
+  }
+
+  /* Single US-Letter page when printed from Chrome */
+  @page { size: Letter; margin: 13mm 15mm; }
+
+  * { box-sizing: border-box; }
+
+  html, body { margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    color: var(--ink);
+    font-size: 10.4pt;
+    line-height: 1.34;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* On-screen: emulate a page so it looks like the PDF */
+  .page {
+    max-width: 7.0in;
+    margin: 0 auto;
+    padding: 18px 4px;
+  }
+
+  h1 {
+    font-size: 19pt;
+    margin: 0 0 2px;
+    letter-spacing: -0.01em;
+  }
+  .lead {
+    color: var(--muted);
+    font-size: 9.2pt;
+    margin: 0 0 10px;
+    padding-bottom: 8px;
+    border-bottom: 2px solid var(--accent);
+  }
+
+  h2 {
+    font-size: 10.6pt;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--accent);
+    margin: 11px 0 3px;
+    break-after: avoid;
+    page-break-after: avoid;
+  }
+
+  p { margin: 0 0 7px; }
+
+  ol.pillars {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    counter-reset: pillar;
+  }
+  ol.pillars > li {
+    position: relative;
+    margin: 0 0 6px;
+    padding-left: 26px;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  ol.pillars > li::before {
+    counter-increment: pillar;
+    content: counter(pillar);
+    position: absolute;
+    left: 0; top: 0.05em;
+    width: 18px; height: 18px;
+    background: var(--accent);
+    color: #fff;
+    border-radius: 50%;
+    font-size: 8.6pt;
+    font-weight: 700;
+    text-align: center;
+    line-height: 18px;
+  }
+
+  code {
+    font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+    font-size: 0.86em;
+    background: var(--code-bg);
+    padding: 0.5px 4px;
+    border-radius: 3px;
+  }
+
+  strong { font-weight: 700; }
+
+  .section { break-inside: avoid; page-break-inside: avoid; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <h1>Harness — Overview</h1>
+  <p class="lead">A framework an AI agent runs inside — the agent focuses on the task; the harness owns the constraints, evaluation, I/O, and failure handling.</p>
+
+  <div class="section">
+    <h2>Purpose</h2>
+    <p>A harness is the framework an AI agent runs inside: the agent focuses on the task, the harness owns the constraints, evaluation, I/O, and failure handling. This one turns a vague request from a non-technical person into a working web page — safely, with the human confirming intent <em>before</em> any building begins.</p>
+  </div>
+
+  <div class="section">
+    <h2>User story</h2>
+    <p>A <strong>website builder for non-technical users.</strong> A user submits a basic idea or change ("a landing page for my bakery"). The harness <strong>clarifies intent first</strong> — asking questions to gather details, then confirming the layout with a <strong>basic ASCII mockup</strong> before it builds. On approval it generates a simple, <strong>SEO-optimized HTML + CSS + JS</strong> page — regenerating <strong><code>sitemap.xml</code> after each iteration</strong> — and <strong>auto-commits every change to a local git repo</strong>, so all versions are tracked and revertable.</p>
+  </div>
+
+  <div class="section">
+    <h2>The harness</h2>
+    <p>A <strong>durable, resumable run orchestrator</strong>. It drives a worker through staged work, persists every step, and can resume after a crash or replay from any checkpoint. The worker is a thin, swappable plug. Priorities: <strong>durability, resilience, simplicity.</strong> Each run is a <strong>session</strong> with its own SQLite DB; a core DB indexes users/sessions; an append-only <strong>event log</strong> is the source of truth.</p>
+  </div>
+
+  <div class="section">
+    <h2>The four pillars</h2>
+    <ol class="pillars">
+      <li><strong>Guardrails — declared constraints, enforced.</strong> Tool allow-lists, turn/token/time caps, a $1/day <strong>spend ceiling</strong>, and a gate that pauses for <strong>human approval every 10 iterations</strong>.</li>
+      <li><strong>Checkpoints — explicit pass/fail gates.</strong> Tiered verification: cheap deterministic checks first (valid HTML/CSS/JS, <strong>SEO tags + <code>sitemap.xml</code></strong>, schema — $0), then an <strong>independent verifier sub-agent</strong>, then a <strong>human</strong> (e.g. confirming the ASCII mockup). Results persist for replay.</li>
+      <li><strong>Material handling — typed I/O.</strong> The worker returns a strict JSON envelope — <code>tool_call</code>, <code>final</code>, or <code>escalate</code> — validated with Pydantic each turn. Generated files are versioned via <strong>automatic local git commits</strong>.</li>
+      <li><strong>Alarms — structured failure signals.</strong> Named alarms with severity, context, and a recommended action (<code>spend_cap_reached</code>, <code>iteration_limit_reached</code>, <code>output_schema_violation</code>) drive retry, escalate, or halt.</li>
+    </ol>
+  </div>
+
+  <div class="section">
+    <h2>How a turn runs</h2>
+    <p>Call the worker → validate JSON → dispatch (run a tool / finish / <strong>escalate to ask the user</strong>) → checkpoint → persist → advance or recover. Guardrails wrap the loop; alarms watch it.</p>
+  </div>
+
+  <div class="section">
+    <h2>Beyond a single run</h2>
+    <p>Workers can spawn <strong>sub-agents</strong> (isolated sessions, fresh context); <strong>compaction</strong> lets a session continue past the model's context limit without losing the durable record. Deployed as a <strong>FastAPI app in Docker</strong> with a bind-mounted SQLite volume and a simple HTML/JS/CSS page that serves as the human-in-the-loop and observability surface.</p>
+  </div>
+
+</div>
+</body>
+</html>
