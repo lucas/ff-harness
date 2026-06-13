@@ -30,7 +30,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, status
 load_dotenv()
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ConfigDict, Field
@@ -578,6 +578,35 @@ def _create_app_routes(app: FastAPI) -> None:
                     },
                 ) from exc
         return report
+
+    # -------------------- download routes --------------------
+
+    @app.get("/sessions/{session_id}/download-site")
+    def download_site(
+        session_id: str,
+        ctx: AppContext = Depends(get_app_context),
+    ):
+        """Stream a zip of all generated site files for a session."""
+        import io
+        import zipfile
+
+        sites_root = ctx.sites_dir / session_id
+        if not sites_root.is_dir() or not any(sites_root.iterdir()):
+            raise _not_found("no_site_files", {"session_id": session_id})
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for path in sorted(sites_root.rglob("*")):
+                if path.is_file():
+                    zf.write(path, path.relative_to(sites_root))
+        buf.seek(0)
+
+        filename = f"site-{session_id[:8]}.zip"
+        return StreamingResponse(
+            buf,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
     # -------------------- HTML routes (web UI) --------------------
 

@@ -844,3 +844,40 @@ def test_rewind_route_400_on_missing_body(make_client):
         f"/sessions/{sid}/rewind", json={"target_event_id": ""}
     )
     assert r2.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Download site
+# ---------------------------------------------------------------------------
+
+
+def test_download_site_returns_zip(make_client, tmp_path):
+    client = make_client([])
+    sid = client.post("/sessions", json={}).json()["session_id"]
+
+    site_dir = tmp_path / "data" / "sites" / sid
+    site_dir.mkdir(parents=True)
+    (site_dir / "index.html").write_text("<h1>Hello</h1>")
+    (site_dir / "style.css").write_text("body{}")
+
+    r = client.get(f"/sessions/{sid}/download-site")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "application/zip"
+    assert "attachment" in r.headers["content-disposition"]
+
+    import io
+    import zipfile
+
+    zf = zipfile.ZipFile(io.BytesIO(r.content))
+    names = sorted(zf.namelist())
+    assert "index.html" in names
+    assert "style.css" in names
+    assert zf.read("index.html") == b"<h1>Hello</h1>"
+
+
+def test_download_site_404_when_no_files(make_client):
+    client = make_client([])
+    sid = client.post("/sessions", json={}).json()["session_id"]
+
+    r = client.get(f"/sessions/{sid}/download-site")
+    assert r.status_code == 404

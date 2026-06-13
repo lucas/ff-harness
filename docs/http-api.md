@@ -304,6 +304,16 @@ Rewind a session to a previous `awaiting_human` event. Destructive but tracked: 
 
 ---
 
+## `GET /sessions/{id}/download-site`
+
+Download all generated site files as a ZIP archive.
+
+- **Response:** `application/zip` with `Content-Disposition: attachment; filename="site-{id_prefix}.zip"`. The ZIP contains all files under `data/sites/{id}/` with paths relative to the session root.
+- **Status codes:** `200 OK` (ZIP streamed), `404 Not Found` (no site directory or empty).
+- **Called by:** the "Download ZIP" button in the Site preview card inside the Details accordion.
+
+---
+
 ## Out of scope for v1
 
-`PATCH /sessions/{id}`, `DELETE /sessions/{id}`, paginated event fetch, auth — all deferred. The six routes above are sufficient for the demo flow and the four rubric pillars.
+`PATCH /sessions/{id}`, `DELETE /sessions/{id}`, paginated event fetch, auth — all deferred. The routes above are sufficient for the demo flow and the four rubric pillars.

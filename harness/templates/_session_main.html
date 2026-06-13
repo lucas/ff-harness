@@ -245,10 +245,14 @@
   {# ---- Site preview (conditional) ---- #}
   {% if has_site_files %}
     <div class="card" id="site-preview-card">
-      <h2>Site preview</h2>
+      <div style="display:flex; align-items:center; justify-content:space-between;">
+        <h2 style="margin:0;">Site preview</h2>
+        <a href="/sessions/{{ session.id }}/download-site" class="btn btn-sm"
+           download>Download ZIP</a>
+      </div>
       {% if has_site_preview %}
         <iframe src="/sites/{{ session.id }}/index.html" width="100%" height="600"
-                style="border:1px solid var(--border); border-radius:4px;"></iframe>
+                style="border:1px solid var(--border); border-radius:4px; margin-top:12px;"></iframe>
       {% else %}
         <div class="muted">Site files exist but no index.html at the root.</div>
       {% endif %}
