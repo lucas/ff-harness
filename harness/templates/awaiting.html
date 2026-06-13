@@ -27,15 +27,26 @@
             <strong>Question:</strong> {{ m.content.question }}
           </p>
           {% if m.content.options %}
-            <p class="muted">Suggested options:
-              {% for opt in m.content.options %}<code>{{ opt }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
-            </p>
+            <div class="row-actions options-row" style="margin-top:8px; flex-wrap: wrap; gap: 8px;">
+              {% for opt in m.content.options %}
+                <button type="submit" class="option-btn" data-option="{{ opt }}">{{ opt }}</button>
+              {% endfor %}
+              <button type="button" class="other-btn" data-action="reveal-other">Other…</button>
+            </div>
+            <div class="other-input" style="display:none; margin-top:8px;">
+              <label for="answer-{{ m.id }}" class="muted" style="display:block;">Your answer:</label>
+              <textarea id="answer-{{ m.id }}" name="answer_text" placeholder="Type your answer..."></textarea>
+              <div class="row-actions" style="margin-top: 8px;">
+                <button type="submit">Submit answer</button>
+              </div>
+            </div>
+          {% else %}
+            <label for="answer-{{ m.id }}" class="muted" style="display:block; margin-top:8px;">Your answer:</label>
+            <textarea id="answer-{{ m.id }}" name="answer_text" required></textarea>
+            <div class="row-actions" style="margin-top: 8px;">
+              <button type="submit">Submit answer</button>
+            </div>
           {% endif %}
-          <label for="answer-{{ m.id }}" class="muted" style="display:block; margin-top:8px;">Your answer:</label>
-          <textarea id="answer-{{ m.id }}" name="answer_text" required></textarea>
-          <div class="row-actions" style="margin-top: 8px;">
-            <button type="submit">Submit answer</button>
-          </div>
         {% endif %}
         <div class="form-result muted" style="margin-top:6px;"></div>
       </form>

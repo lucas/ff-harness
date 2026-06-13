@@ -113,7 +113,13 @@ def build_system_prompt() -> str:
         "\n"
         "# Available tools\n"
         "- ask_user(question, options?) — ask the human one question. Pauses\n"
-        "  the loop until they answer.\n"
+        "  the loop until they answer. When the question has discrete sensible\n"
+        "  choices (yes/no, an industry, a palette, a CTA verb, etc.), pass\n"
+        "  them as `options: list[str]` — the UI renders each as a clickable\n"
+        "  button plus an automatic 'Other…' button for freeform input. Do NOT\n"
+        "  write 'please specify' or 'or other' in the question — the UI\n"
+        "  handles that. Omit `options` only when the answer is genuinely\n"
+        "  open-ended (a business name, a phone number, a tagline).\n"
         "- request_approval(subject, details?) — ask the human to approve a\n"
         "  decision (brief, mockup, etc.). Pauses until they decide.\n"
         "- render_mockup(layout_spec) — render the layout as an ASCII mockup.\n"
@@ -130,9 +136,14 @@ def build_system_prompt() -> str:
         '  {"type":"escalate","reason":"<why you cannot proceed>"}\n'
         "\n"
         "# Examples\n"
-        "Example 1 (asking a question):\n"
+        "Example 1a (open-ended question — no options):\n"
         '{"type":"tool_call","tool":"ask_user","args":{"question":'
-        '"What is the business name?","options":null}}\n'
+        '"What is the business name?"}}\n'
+        "\n"
+        "Example 1b (multiple-choice question — options become buttons + Other…):\n"
+        '{"type":"tool_call","tool":"ask_user","args":{"question":'
+        '"What industry is this?","options":["Restaurant","Coffee shop",'
+        '"Photographer","Home service","Influencer"]}}\n'
         "\n"
         "Example 2 (writing a tiny HTML file):\n"
         '{"type":"tool_call","tool":"write_file","args":{"path":"index.html",'

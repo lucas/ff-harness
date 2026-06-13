@@ -59,6 +59,23 @@
       });
     }
 
+    // "Other…" buttons reveal the freeform textarea inside an options form.
+    document.querySelectorAll('button.other-btn[data-action="reveal-other"]').forEach(function(btn) {
+      btn.addEventListener('click', function(ev) {
+        const form = btn.closest('form.answer-form');
+        if (!form) return;
+        const otherDiv = form.querySelector('.other-input');
+        if (otherDiv) {
+          otherDiv.style.display = 'block';
+          const ta = otherDiv.querySelector('textarea');
+          if (ta) ta.focus();
+        }
+        // Hide the options row so the user knows they're committing to a typed answer.
+        const optsRow = form.querySelector('.options-row');
+        if (optsRow) optsRow.style.display = 'none';
+      });
+    });
+
     // Answer-form submission (each pending material has its own form).
     document.querySelectorAll('form.answer-form').forEach(function(form) {
       form.addEventListener('submit', async function(ev) {
@@ -73,8 +90,14 @@
           const notesEl = form.querySelector('textarea[name="notes"]');
           if (notesEl && notesEl.value) body.notes = notesEl.value;
         } else {
-          const ansEl = form.querySelector('textarea[name="answer_text"]');
-          body.answer_text = ansEl ? ansEl.value : '';
+          // Option button clicked → use its data-option value as the answer.
+          // Otherwise (no options, or user clicked "Other…" then "Submit answer") → use textarea.
+          if (submitter && submitter.dataset && submitter.dataset.option) {
+            body.answer_text = submitter.dataset.option;
+          } else {
+            const ansEl = form.querySelector('textarea[name="answer_text"]');
+            body.answer_text = ansEl ? ansEl.value : '';
+          }
         }
         // Disable inputs while in-flight.
         form.querySelectorAll('button,textarea').forEach(function(el) { el.disabled = true; });
