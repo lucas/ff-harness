@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from harness.models.enums import (
+    AlarmType,
     CheckpointName,
     Direction,
     EventType,
@@ -146,6 +147,17 @@ def _run_loop(
         if session is None:
             raise RuntimeError(f"session {session_id!r} vanished mid-loop")
         stage = session["current_stage"]
+
+        # Auto-resolve obsolete state-based alarms whose condition no longer
+        # holds (e.g. user approved a continuation, counter reset). Event-
+        # based alarms (tool_failed, output_schema_violation) are untouched.
+        _resolve_obsolete_state_alarms(
+            session_conn,
+            iter_since_approval=int(session["iter_since_approval"]),
+            spent_today_usd=store.recent_spend_today_usd(core_conn),
+            turn_cap=config.turn_cap,
+            spend_cap_usd=config.spend_cap_usd,
+        )
 
         # Step 1 — pre-turn guardrails.
         spent = store.recent_spend_today_usd(core_conn)
@@ -498,6 +510,42 @@ def _run_loop(
 
 def _is_terminal_status(status: str) -> bool:
     return status in {SessionStatus.COMPLETED.value, SessionStatus.FAILED.value}
+
+
+def _resolve_obsolete_state_alarms(
+    session_conn: sqlite3.Connection,
+    *,
+    iter_since_approval: int,
+    spent_today_usd: float,
+    turn_cap: int,
+    spend_cap_usd: float,
+) -> int:
+    """Mark state-based alarms resolved if their condition no longer holds.
+
+    Returns count of alarms resolved (for logging/tests). Two states are tracked:
+      - iteration_limit_reached resolves when iter_since_approval < turn_cap
+      - spend_cap_reached resolves when spent_today_usd < spend_cap_usd
+
+    Event-based alarms (tool_failed, output_schema_violation) are NEVER
+    auto-resolved here; they reflect a past event, not a current state.
+    """
+    resolved = 0
+    open_alarms = store.load_alarms(session_conn, resolved=False)
+    for a in open_alarms:
+        t = a["type"]
+        if (
+            t == AlarmType.ITERATION_LIMIT_REACHED.value
+            and iter_since_approval < turn_cap
+        ):
+            store.mark_alarm_resolved(session_conn, a["id"])
+            resolved += 1
+        elif (
+            t == AlarmType.SPEND_CAP_REACHED.value
+            and spent_today_usd < spend_cap_usd
+        ):
+            store.mark_alarm_resolved(session_conn, a["id"])
+            resolved += 1
+    return resolved
 
 
 def _persist_and_record_checkpoint(

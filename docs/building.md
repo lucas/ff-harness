@@ -7,7 +7,7 @@ This file is the live state of the v1 build. It is self-sufficient: after `/clea
 - **Last updated:** 2026-06-13
 - **Current step:** v1 COMPLETE — Steps 0-11 done. Step 12 polish remains optional.
 - **Next step:** Step 12 polish (optional), OR ship/demo.
-- **Last green test:** `uv run pytest tests/ -m "not live"` (259 passed, 1 deselected — Steps 0-11 + chat-first UI redesign + iter-cap fix); `uv run pyright harness/ tests/` (0 errors); `docker build` succeeds (377MB image).
+- **Last green test:** `uv run pytest tests/ -m "not live"` (263 passed, 1 deselected — Steps 0-11 + chat-first UI + iter-cap fix + state-alarm auto-resolve); `uv run pyright harness/ tests/` (0 errors); `docker build` succeeds (377MB image).
 - **Active blockers:** none
 
 ## The 12-step checklist
@@ -74,6 +74,7 @@ Running list of design decisions made during the build. Each entry is one line p
 - **2026-06-13 — 429 → auto-swap to fallback paid model, log `is_fallback=1`, append `model_swapped` event.** **Why:** keeps the demo running without manual intervention; makes the swap visible in the UI and queryable in `spend_log`; bounded blast radius (single retry, then `tool_failed` alarm).
 - **2026-06-13 — Chat-first UI redesign — conversation derived from events (`human_resumed`/`worker_output`), input area context-sensitive on `session.status` + pending materials, details accordion, per-type event summaries instead of JSON expanders.** **Why:** the prior page front-loaded a debug timeline; users want to see what the agent said and what they need to answer next, not a wall of JSON. Pure projection functions in `harness/api/view_helpers.py` keep Jinja logic-free and unit-testable.
 - **2026-06-13 — `iter_since_approval` resets on ANY `human_resumed` (bug fix) + `continuation_approval` pending material added when iter/spend caps trip.** **Why:** the old code only reset the counter when the user approved a brief or mockup — a freeform `ask_user` answer left the counter ticking and the user could hit the cap immediately after answering. Resetting on ANY resume matches the intent ("autonomous iterations between human inputs"). The new `continuation_approval` kind gives the UI something concrete to render when a cap trips, rather than a paused-but-empty input area.
+- **2026-06-13 — State-based alarms (`iteration_limit_reached`, `spend_cap_reached`) auto-resolve when their condition no longer holds.** **Why:** these alarms describe a current state (counter vs cap, spend vs cap), not a past event. Leaving them `resolved=0` forever after the user approves a continuation or the rolling-24h spend window rolls is misleading. The orchestrator now calls `_resolve_obsolete_state_alarms` at the top of each loop iteration. Event-based alarms (`tool_failed`, `output_schema_violation`) are intentionally excluded — they reflect a past incident and are append-only history.
 
 ## Maintenance protocol
 

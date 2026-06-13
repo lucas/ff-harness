@@ -1146,3 +1146,257 @@ def test_noop_resume_on_completed_session(orchestrator_setup):
     with setup["session_conn_factory"]() as session_conn:
         events = store.load_events(session_conn)
     assert events == []
+
+
+# ---------------------------------------------------------------------------
+# State-based alarm auto-resolution
+# ---------------------------------------------------------------------------
+
+
+def test_continuation_approval_resolves_iter_alarm(orchestrator_setup):
+    """Approving a continuation_approval resolves the iter-cap alarm.
+
+    iteration_limit_reached is state-based: once the counter is reset (by
+    a human resume) and falls below the cap, the alarm row must flip to
+    resolved=1 on the next run_until_pause.
+    """
+    setup = orchestrator_setup
+    session_id = setup["session_id"]
+    # Force the cap at session entry.
+    store.update_session_status(
+        setup["core_conn"],
+        session_id,
+        SessionStatus.ACTIVE.value,
+        iter_since_approval=10,
+    )
+    worker = MockWorker(scripted_responses=[Final(summary="resumed after cap")])
+    workers_by_stage = {Stage.BOOTSTRAP.value: worker}
+    config = _build_config(
+        core_db_path=setup["core_db_path"],
+        sessions_dir=setup["sessions_dir"],
+        sandbox_root=setup["sandbox_root"],
+        workers_by_stage=workers_by_stage,
+        turn_cap=10,
+    )
+
+    r1 = run_until_pause(session_id, config)
+    assert r1.status == SessionStatus.AWAITING_HUMAN.value
+    assert r1.paused_reason == PAUSE_TURN_CAP
+
+    # Capture the freshly-raised iter alarm id (still unresolved).
+    with setup["session_conn_factory"]() as session_conn:
+        rows_before = store.load_alarms(session_conn)
+    iter_rows = [
+        r
+        for r in rows_before
+        if r["type"] == AlarmType.ITERATION_LIMIT_REACHED.value
+    ]
+    assert iter_rows, "expected an iteration_limit_reached alarm"
+    assert all(r["resolved"] is False for r in iter_rows)
+    target_id = iter_rows[-1]["id"]
+
+    # Approve the continuation — counter resets to 0 on resume-fold.
+    with setup["session_conn_factory"]() as session_conn:
+        pending_mid = _last_pending_continuation_material_id(session_conn)
+        _simulate_human_approval(
+            setup["core_conn"],
+            session_conn,
+            session_id,
+            pending_material_id=pending_mid,
+            approved=True,
+            subject="continuation",
+            stage=Stage.BOOTSTRAP.value,
+        )
+
+    r2 = run_until_pause(session_id, config)
+    assert r2.status == SessionStatus.COMPLETED.value
+
+    with setup["session_conn_factory"]() as session_conn:
+        rows_after = store.load_alarms(session_conn)
+    alarm_after = next(r for r in rows_after if r["id"] == target_id)
+    assert alarm_after["resolved"] is True, (
+        "iteration_limit_reached alarm should auto-resolve after counter reset"
+    )
+
+
+def test_resume_without_continuation_leaves_alarm_unresolved(orchestrator_setup):
+    """If the iter cap still holds on resume, the old alarm stays open and
+    a new one is appended on the next trip.
+
+    No continuation_approval is granted — the counter remains >= cap, so
+    the state condition still holds. The original alarm must remain
+    resolved=0, and the next loop iteration must raise a fresh alarm row.
+    """
+    setup = orchestrator_setup
+    session_id = setup["session_id"]
+    store.update_session_status(
+        setup["core_conn"],
+        session_id,
+        SessionStatus.ACTIVE.value,
+        iter_since_approval=10,
+    )
+    worker = MockWorker(scripted_responses=[Final(summary="unused")])
+    workers_by_stage = {Stage.BOOTSTRAP.value: worker}
+    config = _build_config(
+        core_db_path=setup["core_db_path"],
+        sessions_dir=setup["sessions_dir"],
+        sandbox_root=setup["sandbox_root"],
+        workers_by_stage=workers_by_stage,
+        turn_cap=10,
+    )
+
+    r1 = run_until_pause(session_id, config)
+    assert r1.status == SessionStatus.AWAITING_HUMAN.value
+    assert r1.paused_reason == PAUSE_TURN_CAP
+
+    with setup["session_conn_factory"]() as session_conn:
+        rows_first = store.load_alarms(session_conn)
+    iter_rows_first = [
+        r
+        for r in rows_first
+        if r["type"] == AlarmType.ITERATION_LIMIT_REACHED.value
+    ]
+    assert len(iter_rows_first) == 1
+    original_id = iter_rows_first[0]["id"]
+
+    # Forge an active state WITHOUT user approval, leaving the counter at
+    # the cap. The next run will re-trip the cap and append a new alarm.
+    store.update_session_status(
+        setup["core_conn"],
+        session_id,
+        SessionStatus.ACTIVE.value,
+        iter_since_approval=10,
+    )
+
+    r2 = run_until_pause(session_id, config)
+    assert r2.status == SessionStatus.AWAITING_HUMAN.value
+    assert r2.paused_reason == PAUSE_TURN_CAP
+
+    with setup["session_conn_factory"]() as session_conn:
+        rows_second = store.load_alarms(session_conn)
+    iter_rows_second = [
+        r
+        for r in rows_second
+        if r["type"] == AlarmType.ITERATION_LIMIT_REACHED.value
+    ]
+    # Original alarm should still be unresolved; a new alarm row appended.
+    original_after = next(r for r in iter_rows_second if r["id"] == original_id)
+    assert original_after["resolved"] is False
+    assert len(iter_rows_second) >= 2, (
+        "expected a new iteration_limit_reached alarm row to be appended"
+    )
+    new_rows = [r for r in iter_rows_second if r["id"] != original_id]
+    assert any(r["resolved"] is False for r in new_rows)
+
+
+def test_spend_cap_alarm_resolves_when_spend_drops(orchestrator_setup):
+    """spend_cap_reached must auto-resolve when 24h spend drops below cap."""
+    setup = orchestrator_setup
+    session_id = setup["session_id"]
+
+    # Seed >$1 of spend in the last 24h.
+    now = datetime.now(timezone.utc)
+    spend_id_a = store.record_spend(
+        setup["core_conn"],
+        session_id,
+        model="deepseek/deepseek-v4-flash",
+        tokens_in=1000,
+        tokens_out=200,
+        cost_usd=0.7,
+        ts=now - timedelta(minutes=10),
+    )
+    spend_id_b = store.record_spend(
+        setup["core_conn"],
+        session_id,
+        model="qwen/qwen3-coder",
+        tokens_in=2000,
+        tokens_out=400,
+        cost_usd=0.4,
+        ts=now - timedelta(minutes=5),
+    )
+
+    worker = MockWorker(
+        scripted_responses=[Final(summary="proceeded after spend dropped")]
+    )
+    workers_by_stage = {Stage.BOOTSTRAP.value: worker}
+    config = _build_config(
+        core_db_path=setup["core_db_path"],
+        sessions_dir=setup["sessions_dir"],
+        sandbox_root=setup["sandbox_root"],
+        workers_by_stage=workers_by_stage,
+        spend_cap_usd=1.0,
+    )
+
+    r1 = run_until_pause(session_id, config)
+    assert r1.status == SessionStatus.AWAITING_HUMAN.value
+    assert r1.paused_reason == PAUSE_SPEND_CAP
+
+    with setup["session_conn_factory"]() as session_conn:
+        rows_before = store.load_alarms(session_conn)
+    spend_rows = [
+        r for r in rows_before if r["type"] == AlarmType.SPEND_CAP_REACHED.value
+    ]
+    assert spend_rows and all(r["resolved"] is False for r in spend_rows)
+    target_id = spend_rows[-1]["id"]
+
+    # Drop the spend below the cap and flip the session back to active so
+    # the loop will reach the resolve step.
+    setup["core_conn"].execute(
+        "DELETE FROM spend_log WHERE id IN (?, ?)", (spend_id_a, spend_id_b)
+    )
+    setup["core_conn"].commit()
+    store.update_session_status(
+        setup["core_conn"], session_id, SessionStatus.ACTIVE.value
+    )
+
+    r2 = run_until_pause(session_id, config)
+    assert r2.status == SessionStatus.COMPLETED.value
+
+    with setup["session_conn_factory"]() as session_conn:
+        rows_after = store.load_alarms(session_conn)
+    alarm_after = next(r for r in rows_after if r["id"] == target_id)
+    assert alarm_after["resolved"] is True, (
+        "spend_cap_reached alarm should auto-resolve when spend drops below cap"
+    )
+
+
+def test_tool_failed_alarm_never_auto_resolved(orchestrator_setup):
+    """Event-based alarms (tool_failed) must stay resolved=0 across runs.
+
+    Raising a tool_failed alarm directly, then running a clean loop to
+    completion, must leave the alarm unresolved — these reflect a past
+    event, not a current condition the harness can re-check.
+    """
+    setup = orchestrator_setup
+    session_id = setup["session_id"]
+
+    with setup["session_conn_factory"]() as session_conn:
+        from harness.services import alarms as _alarms
+
+        target_id = _alarms.raise_tool_failed(
+            session_conn,
+            tool="write_file",
+            args={"path": "x"},
+            error_kind="sandbox_escape",
+            error_message="denied",
+            stage=Stage.BOOTSTRAP.value,
+        )
+
+    worker = MockWorker(scripted_responses=[Final(summary="normal exit")])
+    workers_by_stage = {Stage.BOOTSTRAP.value: worker}
+    config = _build_config(
+        core_db_path=setup["core_db_path"],
+        sessions_dir=setup["sessions_dir"],
+        sandbox_root=setup["sandbox_root"],
+        workers_by_stage=workers_by_stage,
+    )
+
+    r = run_until_pause(session_id, config)
+    assert r.status == SessionStatus.COMPLETED.value
+
+    with setup["session_conn_factory"]() as session_conn:
+        rows = store.load_alarms(session_conn)
+    alarm = next(r for r in rows if r["id"] == target_id)
+    assert alarm["resolved"] is False, (
+        "tool_failed is event-based; must never be auto-resolved"
+    )

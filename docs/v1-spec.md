@@ -286,6 +286,8 @@ Each alarm row: `{id, type, severity, context, recommended_action, stage, trigge
 | `output_schema_violation` | `critical` | `{parse_error, repair_attempt, raw_text_preview}` | "Repair attempted {repair_attempt}x and still invalid. Stop and surface raw_text_preview to human." |
 | `tool_failed` | `error` | `{tool, args, error_kind, error_message}` | "Tool {tool} failed with {error_kind}. Inspect args; consider retry or alternative tool." |
 
+`iteration_limit_reached` and `spend_cap_reached` are state-based and auto-resolve when the condition no longer holds (checked at the start of `run_until_pause`). `tool_failed` and `output_schema_violation` are event-based and stay `resolved=0` until explicitly resolved.
+
 ## 10. The 6 tools
 
 All six are worker-callable. `ask_user` and `request_approval` are escalation surfaces (write `pending_question` material + return paused sentinel). `write_file` triggers the post-hook chain. SEO regen, validation, and git commit are **not** in the tool list — they are post-hooks (§11).
