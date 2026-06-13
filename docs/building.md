@@ -5,9 +5,9 @@ This file is the live state of the v1 build. It is self-sufficient: after `/clea
 ## Status snapshot
 
 - **Last updated:** 2026-06-13
-- **Current step:** Step 7 — Orchestrator (MockWorker drives full loop) — MILESTONE
-- **Next step:** Step 8 — LLMWorker × 2 + LLM client + 429 fallback
-- **Last green test:** `uv run pytest tests/` (179 passed — Steps 0-6 combined); `uv run pyright harness/ tests/` (0 errors).
+- **Current step:** Step 8 — LLMWorker × 2 + LLM client + 429 fallback (next up)
+- **Next step:** Step 9 — Domain bundle + FastAPI routes (Layer 3)
+- **Last green test:** `uv run pytest tests/` (187 passed — Steps 0-7 combined, MILESTONE met: all 4 pillars + Worker pillar demonstrated on MockWorker); `uv run pyright harness/ tests/` (0 errors).
 - **Active blockers:** none
 
 ## The 12-step checklist
@@ -35,7 +35,7 @@ Each row is one step from the Build Order in `/Users/elroy/.claude/plans/ignore-
 - [x] **Step 6 — Checkpoints.** Status: done (2026-06-13).
   - Gate: `uv run pytest tests/services/test_checkpoints.py`
   - Done when: all 5 checkpoints pass on a good fixture, fail on a bad fixture, and `criteria_results` keys match the spec table.
-- [ ] **Step 7 — Orchestrator (MockWorker E2E).** Status: pending.
+- [x] **Step 7 — Orchestrator (MockWorker E2E).** Status: done (2026-06-13). MILESTONE — all 4 pillars + Worker pillar demonstrable on MockWorker.
   - Gate: `uv run pytest tests/services/test_orchestrator_mock.py`
   - Done when: scripted 6-turn restaurant session drives every event type, writes every named checkpoint row, and all 4 alarms are raisable; crash-resume sub-test produces identical terminal state. **Major milestone — all four pillars + Worker pillar demonstrable on MockWorker.**
 - [ ] **Step 8 — LLMWorker × 2 + LLM client + 429 fallback.** Status: pending.
