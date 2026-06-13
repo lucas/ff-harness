@@ -414,6 +414,24 @@ def _build_llm_prompt(
 
     section_names = _section_names(sections)
 
+    # Include all remaining brief fields so the LLM uses real business
+    # details (phone, address, hours, services, etc.) instead of inventing.
+    _BRIEF_CORE_KEYS = {
+        "name", "tagline", "industry", "audience", "aesthetic",
+        "primary_cta", "palette",
+    }
+    extra_lines: list[str] = []
+    if isinstance(brief, dict):
+        for k, v in brief.items():
+            if k in _BRIEF_CORE_KEYS or not v:
+                continue
+            label = k.replace("_", " ").title()
+            if isinstance(v, list):
+                extra_lines.append(f"- {label}: {', '.join(str(x) for x in v)}")
+            else:
+                extra_lines.append(f"- {label}: {v}")
+    extra_block = "\n".join(extra_lines)
+
     prompt = (
         "You are generating a wireframe HTML mockup for a small-business"
         " website.\n\n"
@@ -423,7 +441,9 @@ def _build_llm_prompt(
         f"- Industry: {industry}\n"
         f"- Audience: {audience}\n"
         f"- Primary CTA: {cta}\n"
-        f"- Sections: {section_names}\n\n"
+        f"- Sections: {section_names}\n"
+        + (f"{extra_block}\n" if extra_block else "")
+        + "\n"
         "Visual style:\n"
         f"- Color palette: primary={primary_hex}, secondary={secondary_hex}\n"
         f"- Aesthetic: {aesthetic}\n\n"
@@ -447,8 +467,9 @@ def _build_llm_prompt(
         " tags except favicon optional)\n"
         '- Sandbox-safe (the document will be embedded in <iframe sandbox="">)\n'
         "- Use the palette colors prominently\n"
-        "- Use the actual business name, tagline, sections, and CTA text"
-        " — don't substitute placeholders\n\n"
+        "- Use the EXACT business details provided above (name, tagline,"
+        " phone, address, hours, etc.) — NEVER invent or substitute"
+        " placeholder content\n\n"
         "Respond with ONLY the HTML document. No markdown fences, no"
         " preamble, no explanation. Just the HTML."
     )

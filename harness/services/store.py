@@ -333,9 +333,19 @@ def rewind_to_awaiting_human(
     # commits on success and rolls back on exception, so an error inside the
     # body (e.g. FK violation, monkeypatched failure) leaves the DB unchanged.
     with session_conn:
-        # Count then delete. Order is FK-safe: events references material /
-        # checkpoints / alarms, so events must die first (deleting those
-        # parents would otherwise trip FK enforcement).
+        # Count then delete. Order is FK-safe: llm_calls references events
+        # + material, and events references material / checkpoints / alarms,
+        # so llm_calls must die first, then events, then the rest.
+        removed_llm_calls = int(
+            session_conn.execute(
+                "SELECT COUNT(*) FROM llm_calls WHERE related_event_id > ? OR related_material_id > ?",
+                (target_event_id, target_event_id),
+            ).fetchone()[0]
+        )
+        session_conn.execute(
+            "DELETE FROM llm_calls WHERE related_event_id > ? OR related_material_id > ?",
+            (target_event_id, target_event_id),
+        )
         removed_events = int(
             session_conn.execute(
                 "SELECT COUNT(*) FROM events WHERE id > ?",
@@ -408,6 +418,7 @@ def rewind_to_awaiting_human(
                         "removed_materials": removed_materials,
                         "removed_checkpoints": removed_checkpoints,
                         "removed_alarms": removed_alarms,
+                        "removed_llm_calls": removed_llm_calls,
                         "repended_material_id": repended_material_id,
                     }
                 ),
@@ -423,6 +434,7 @@ def rewind_to_awaiting_human(
         "removed_materials": removed_materials,
         "removed_checkpoints": removed_checkpoints,
         "removed_alarms": removed_alarms,
+        "removed_llm_calls": removed_llm_calls,
         "repended_material_id": repended_material_id,
         "rewind_event_id": rewind_event_id,
     }

@@ -460,9 +460,41 @@ def test_rewind_appends_rewound_event_with_correct_payload(tmp_session):
         "removed_materials",
         "removed_checkpoints",
         "removed_alarms",
+        "removed_llm_calls",
         "repended_material_id",
     }
     assert set(rewound["payload"].keys()) == expected_keys
+
+
+def test_rewind_deletes_llm_calls_referencing_removed_events(tmp_session):
+    _, session_conn, _ = tmp_session
+    ids = _build_rewind_fixture(session_conn)
+
+    llm_before = store.record_llm_call(
+        session_conn,
+        model="test-model", is_fallback=False,
+        request_messages=[{"role": "user", "content": "hi"}],
+        request_options=None,
+        response_text="{}", finish_reason="stop",
+        tokens_in=1, tokens_out=1, cost_usd=0.0, status="ok",
+        related_event_id=ids["awaiting_a_event"],
+    )
+    llm_after = store.record_llm_call(
+        session_conn,
+        model="test-model", is_fallback=False,
+        request_messages=[{"role": "user", "content": "hi"}],
+        request_options=None,
+        response_text="{}", finish_reason="stop",
+        tokens_in=1, tokens_out=1, cost_usd=0.0, status="ok",
+        related_event_id=ids["worker_output"],
+    )
+    report = store.rewind_to_awaiting_human(session_conn, ids["awaiting_a_event"])
+
+    assert report["removed_llm_calls"] == 1
+    rows = store.load_llm_calls(session_conn)
+    surviving_ids = [r["id"] for r in rows]
+    assert llm_before in surviving_ids
+    assert llm_after not in surviving_ids
 
 
 # ---------------------------------------------------------------------------

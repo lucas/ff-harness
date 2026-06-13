@@ -643,6 +643,26 @@ def build_conversation(
     the human's underlying pending material so we can render the right copy
     (approval vs. continuation_approval vs. freeform answer).
     """
+    # Pre-scan: build a set of worker_output event IDs whose tool_result
+    # reported ok=false, so we can suppress attachments (e.g. mockup iframe)
+    # for failed tool calls.
+    failed_tool_events: set[str] = set()
+    for i, ev in enumerate(events):
+        if ev.get("type") != "worker_output":
+            continue
+        env = _as_dict(_as_dict(ev.get("payload")).get("envelope"))
+        if env.get("type") != "tool_call":
+            continue
+        tool_name = env.get("tool", "")
+        for j in range(i + 1, min(i + 5, len(events))):
+            later = events[j]
+            if later.get("type") == "tool_result":
+                lp = _as_dict(later.get("payload"))
+                if lp.get("tool") == tool_name:
+                    if not lp.get("ok", True):
+                        failed_tool_events.add(ev.get("id", ""))
+                    break
+
     out: list[dict] = []
     for event in events:
         etype = event.get("type")
@@ -735,8 +755,10 @@ def build_conversation(
             if wt == "tool_call":
                 tool = envelope.get("tool", "")
                 args = _as_dict(envelope.get("args"))
+                event_id = event.get("id", "")
+                tool_ok = event_id not in failed_tool_events
                 body, extra, render_md = _tool_call_body(
-                    tool, args, materials_by_id
+                    tool, args, materials_by_id, tool_ok=tool_ok
                 )
                 # Approval bubbles (and any future tool that builds its own
                 # HTML) pass a pre-rendered, already-escaped fragment via
@@ -915,7 +937,8 @@ def _render_generic_tool_call_card(tool_name: str, args: dict) -> tuple[str, str
 
 
 def _tool_call_body(
-    tool: str, args: dict, materials_by_id: dict[str, dict] | None = None
+    tool: str, args: dict, materials_by_id: dict[str, dict] | None = None,
+    *, tool_ok: bool = True,
 ) -> tuple[str, dict, bool]:
     """Render a per-tool bubble body.
 
@@ -961,11 +984,8 @@ def _tool_call_body(
         sections = sections_raw if isinstance(sections_raw, list) else []
         n_sections = len(sections)
         plain = f"Rendered mockup ({n_sections} sections)"
-        # If we can find the persisted mockup material, render the bubble
-        # body as a small caption and emit the iframe as a full-width
-        # attachment under the bubble (see ``attachment_html`` handling in
-        # build_conversation). Otherwise fall back to the plain text
-        # summary (existing behavior).
+        if not tool_ok:
+            return plain, {}, False
         preview = (
             _latest_mockup_html(materials_by_id)
             if materials_by_id

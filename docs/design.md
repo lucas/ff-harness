@@ -2,37 +2,42 @@
 
 High-level component map and request flow. For the narrative see `overview.md`; for full implementation detail see `implementation-architecture.md`. Diagrams are Mermaid (render in GitHub/VS Code).
 
-> **v1 MVP omits the verifier sub-agent and `subagent.py`; checkpoints are deterministic only. The diagrams below show the full architecture — the v1-shipped subset is documented in `docs/v1-spec.md`.**
+> **v1 checkpoints are deterministic only (no verifier sub-agent). Diagrams below reflect the shipped v1 architecture as documented in `docs/v1-spec.md`.**
 
 ## Component architecture
 
 ```mermaid
 flowchart TB
   user(["Non-technical user"])
-  landing["Landing page — static/<br/>HITL + observability surface"]
-  api["FastAPI app — app.py"]
+  landing["Landing page — Jinja2 templates<br/>HITL + observability surface"]
+  api["FastAPI app — api/app.py"]
 
   subgraph core["Harness core (domain-agnostic)"]
-    orch["Orchestrator — orchestrator.py<br/>bounded, resumable loop"]
-    mat["Material handling — material.py<br/>context assembly + JSON envelope"]
-    ctx["Context + compaction — context.py"]
-    guard["Guardrails — guardrails.py"]
-    check["Checkpoints + Verification<br/>checkpoints.py / verification.py"]
-    alarm["Alarms — alarms.py"]
+    orch["Orchestrator — services/orchestrator.py<br/>bounded, resumable loop"]
+    store["Store — services/store.py<br/>material + event persistence"]
+    guard["Guardrails — services/guardrails.py"]
+    check["Checkpoints — services/checkpoints.py<br/>deterministic only (v1)"]
+    alarm["Alarms — services/alarms.py"]
+    posthook["Post-hooks — services/post_hooks.py<br/>validate → SEO regen → git commit"]
+    valid["Validators — services/validators.py<br/>html5lib + tinycss2"]
   end
 
   subgraph bundle["Per-domain bundle (declared, swappable)"]
-    tools["Tools registry + dispatch — tools.py"]
-    skills["Skills — skills.py"]
+    domain["Domain config — domain/website_builder.py<br/>tools allow-list · stage map · system prompt · skills"]
+    tools["Tools — services/tools/<br/>user · files · mockup · brief"]
   end
 
-  worker["Worker, swappable — worker.py"]
-  llm["LLM client — llm.py"]
-  openrouter[("OpenRouter · Nemotron free")]
-  sub["Sub-agent — subagent.py<br/>nested session"]
+  subgraph workers["Workers (two-worker stage map)"]
+    chatw["Chat worker — LLMWorker<br/>DeepSeek v4 Flash"]
+    codew["Code worker — LLMWorker<br/>Qwen3 Coder"]
+    mockw["MockWorker — scripted (tests)"]
+  end
 
-  core_db[("Core DB · harness.db<br/>users · sessions · spend_log")]
-  sess_db[("Session DB · sessions/{uuid}.db<br/>events · checkpoints · material · alarms")]
+  llm["LLM client — services/llm.py"]
+  openrouter[("OpenRouter API")]
+
+  core_db[("Core DB · harness.db<br/>sessions · spend_log")]
+  sess_db[("Session DB · sessions/{uuid}.db<br/>events · checkpoints · material · alarms · llm_calls")]
   gitrepo[("Local git repo · generated site")]
 
   user <--> landing
@@ -40,62 +45,81 @@ flowchart TB
   api <--> orch
 
   orch --> guard
-  orch --> mat
-  mat --> ctx
-  mat -- WorkerContext --> worker
-  worker -- "WorkerResponse (JSON envelope)" --> mat
-  worker --> llm
+  orch --> store
+  orch -- "WorkerContext" --> chatw
+  orch -- "WorkerContext" --> codew
+  chatw -- "JSON envelope" --> orch
+  codew -- "JSON envelope" --> orch
+  chatw --> llm
+  codew --> llm
   llm --> openrouter
-  mat -. injects skills .-> skills
+  domain -. "configures" .-> orch
 
   orch -- tool_call --> tools
   guard -. allow/deny .-> tools
   tools -- result as data --> orch
   tools --> gitrepo
 
+  orch -- "after write_file" --> posthook
+  posthook --> valid
+  posthook --> gitrepo
+
   orch --> check
-  check -. semantic gate .-> sub
   orch --> alarm
   alarm --> landing
 
-  orch --> core_db
-  orch --> sess_db
+  store --> core_db
+  store --> sess_db
   check --> sess_db
 ```
 
 ## Key interfaces
-- **User ↔ Landing page ↔ FastAPI** — HTTP/JSON: submit an idea, view status/cost, answer escalations (approve/deny).
-- **FastAPI ↔ Orchestrator** — create or resume a run by `session_id`.
-- **Orchestrator ↔ Worker** — the *only* agent contract: `Worker.act(WorkerContext) -> WorkerResponse`, a serializable, data-only boundary (see *Swappable worker boundary* in `implementation-architecture.md`).
-- **Worker ↔ LLM ↔ OpenRouter** — provider details isolated in `llm.py`; returns tokens/cost/latency.
-- **Orchestrator ↔ Tools** — orchestrator hands a validated `tool_call`; guardrails allow-list it; dispatch executes; result returns as data.
-- **Orchestrator ↔ Guardrails / Checkpoints / Alarms** — pre/post interception, tiered verification, structured alarms.
-- **Orchestrator ↔ Store** — append events + checkpoints to the session DB; users/sessions/spend_log in the core DB; cost mirrored for the daily cap.
-- **Orchestrator ↔ Sub-agent** — spawn a nested session (own DB, fresh context); only the result returns to the parent.
-- **HITL** — `escalate` → `awaiting_human` → landing page → approve/deny → resume from the last checkpoint.
+- **User ↔ Jinja2 templates ↔ FastAPI** — HTTP/HTML: chat-first UI with conversation bubbles, context-sensitive input area, details accordion, cost/alarm display.
+- **FastAPI ↔ Orchestrator** — create or resume a run by `session_id`; `/resume` auto-unsticks `awaiting_human` via `force_continue`.
+- **Orchestrator ↔ Worker** — the *only* agent contract: `Worker.act(WorkerContext) -> ToolCall | Final | Escalate`, a serializable, data-only boundary. Two stage-mapped `LLMWorker` instances (chat + code) wired by the domain bundle; `MockWorker` for tests.
+- **Worker ↔ LLM ↔ OpenRouter** — provider details isolated in `services/llm.py`; returns tokens/cost/latency. 429 → auto-swap to fallback model.
+- **Orchestrator ↔ Tools** — orchestrator hands a validated `tool_call`; guardrails allow-list it (7 tools); dispatch executes; result returns as data.
+- **Orchestrator ↔ Post-hooks** — after every successful `write_file`: validate (html5lib/tinycss2) → regenerate SEO artifacts → git commit.
+- **Orchestrator ↔ Guardrails / Checkpoints / Alarms** — pre/post interception, deterministic verification (5 checkpoints), 4 alarm types with state-based auto-resolve.
+- **Orchestrator ↔ Store** — append events + checkpoints + materials to the per-session DB; sessions/spend_log in the core DB; `llm_calls` audit table in the per-session DB.
+- **HITL** — `escalate` / iter-cap / spend-cap → `awaiting_human` → chat UI → approve/deny/answer → resume. Rewind to any prior `awaiting_human` event via `POST /sessions/{id}/rewind`.
 
 ## The turn loop
 
 ```mermaid
 flowchart TD
-  start(["Resume or start session"]) --> assemble["Material: assemble WorkerContext<br/>+ compact if near context limit"]
-  assemble --> pre{"Guardrails pre-check<br/>caps · spend · approval"}
-  pre -- "block / 10-iter gate" --> hitl[["Escalate → awaiting_human"]]
-  pre -- ok --> act["Worker.act → JSON envelope"]
-  act --> validate{"Valid envelope?"}
-  validate -- no --> repair["Repair retry,<br/>else output_schema_violation alarm"]
-  repair --> act
+  start(["Resume or start session"]) --> resolve_alarms["Resolve obsolete state alarms<br/>(iter/spend caps auto-clear)"]
+  resolve_alarms --> assemble["Assemble WorkerContext<br/>(events + materials + system prompt)"]
+  assemble --> pre{"Guardrails pre-check<br/>iter cap · spend cap"}
+  pre -- "10-iter gate /<br/>$1 spend cap" --> cap_hitl["Persist continuation_approval<br/>→ awaiting_human"]
+  pre -- ok --> select["Select worker by stage<br/>(chat or code)"]
+  select --> act["Worker.act → LLM call"]
+  act --> cjk{"CJK drift<br/>detected?"}
+  cjk -- yes --> lang_retry["Retry with English-strict<br/>directive (once)"]
+  lang_retry --> cjk2{"Still CJK?"}
+  cjk2 -- yes --> alarm_osv["output_schema_violation alarm<br/>→ Escalate"]
+  cjk2 -- no --> validate
+  cjk -- no --> validate{"Valid JSON<br/>envelope?"}
+  validate -- no --> repair["Repair retry (once)"]
+  repair --> validate2{"Valid now?"}
+  validate2 -- no --> alarm_osv
+  validate2 -- yes --> dispatch
   validate -- yes --> dispatch{"Envelope type"}
-  dispatch -- tool_call --> tool["Guardrails allow-list →<br/>Tools dispatch → result as data"]
-  tool --> persist
-  dispatch -- escalate --> hitl
-  dispatch -- final --> verify["Checkpoints: tiered verify<br/>deterministic → verifier sub-agent → human"]
-  verify --> persist[("Persist event + checkpoint → session DB<br/>cost → spend_log · git commit")]
+  dispatch -- tool_call --> tool["Guardrails allow-list →<br/>Tools dispatch → result"]
+  tool --> posthook{"write_file?"}
+  posthook -- yes --> hooks["Post-hooks: validate →<br/>SEO regen → git commit"]
+  hooks --> persist
+  posthook -- no --> persist
+  dispatch -- escalate --> hitl[["awaiting_human"]]
+  dispatch -- final --> check["Checkpoints: deterministic<br/>evaluate (5 gates)"]
+  check --> persist[("Persist event + material +<br/>checkpoint → session DB<br/>cost → spend_log + llm_calls")]
   persist --> done{"Done?"}
   done -- no --> assemble
   done -- yes --> finish(["Return result"])
-  hitl -- approve --> assemble
+  hitl -- "approve / answer" --> assemble
   hitl -- deny --> finish
+  cap_hitl -- "/resume" --> assemble
+  cap_hitl -- stop --> finish
 ```
 
-**In one line:** guardrails wrap the loop, material handling assembles context and validates the worker's JSON, the worker only *proposes* actions, tools execute under allow-list, checkpoints verify, alarms watch, and every step is persisted to the session DB — resumable from any checkpoint.
+**In one line:** guardrails wrap the loop, the orchestrator selects the stage-appropriate worker, validates the JSON envelope (with CJK-drift and repair retries), tools execute under allow-list with post-hooks on writes, deterministic checkpoints verify, alarms watch, and every step is persisted — resumable from any event.
