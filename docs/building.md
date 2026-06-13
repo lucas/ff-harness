@@ -5,9 +5,9 @@ This file is the live state of the v1 build. It is self-sufficient: after `/clea
 ## Status snapshot
 
 - **Last updated:** 2026-06-13
-- **Current step:** Step 9 — Domain bundle + FastAPI routes (Layer 3) — next up
-- **Next step:** Step 10 — Jinja2 templates (Layer 4)
-- **Last green test:** `uv run pytest tests/ -m "not live"` (199 passed, 1 deselected — Steps 0-8 combined); `uv run pyright harness/ tests/` (0 errors).
+- **Current step:** Step 10 — Jinja2 templates (Layer 4) — next up
+- **Next step:** Step 11 — Demo polish + Docker + HARNESS.md
+- **Last green test:** `uv run pytest tests/ -m "not live"` (208 passed, 1 deselected — Steps 0-9 combined); `uv run pyright harness/ tests/` (0 errors).
 - **Active blockers:** none
 
 ## The 12-step checklist

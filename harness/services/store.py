@@ -188,6 +188,37 @@ def recent_spend_today_usd(
     return float(row["total"])
 
 
+def spend_summary_for_session(
+    core_conn: sqlite3.Connection,
+    session_id: str,
+) -> dict:
+    """Aggregate spend rows for a single session.
+
+    Returns `{total_usd, by_model: {model_string: total_usd}, fallback_count}`.
+    Used by GET /sessions/{id} per docs/http-api.md. Sessions with no spend
+    return `{total_usd: 0.0, by_model: {}, fallback_count: 0}`.
+    """
+    rows = core_conn.execute(
+        "SELECT model, is_fallback, cost_usd FROM spend_log WHERE session_id = ?",
+        (session_id,),
+    ).fetchall()
+    total_usd = 0.0
+    by_model: dict[str, float] = {}
+    fallback_count = 0
+    for r in rows:
+        cost = float(r["cost_usd"])
+        total_usd += cost
+        model = str(r["model"])
+        by_model[model] = by_model.get(model, 0.0) + cost
+        if int(r["is_fallback"]) == 1:
+            fallback_count += 1
+    return {
+        "total_usd": total_usd,
+        "by_model": by_model,
+        "fallback_count": fallback_count,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Events (per-session DB)
 # ---------------------------------------------------------------------------
