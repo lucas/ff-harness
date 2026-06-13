@@ -18,7 +18,7 @@ from typing import Callable
 
 from harness.services import guardrails
 from harness.services.alarms import raise_tool_failed
-from harness.services.tools import files, mockup, user
+from harness.services.tools import brief, files, mockup, user
 
 
 @dataclass
@@ -63,6 +63,7 @@ REGISTRY: dict[str, Callable[[dict, "ToolContext"], "ToolResult"]] = {
     "write_file": files.write_file,
     "list_files": files.list_files,
     "render_mockup": mockup.render_mockup,
+    "save_business_brief": brief.save_business_brief,
 }
 
 

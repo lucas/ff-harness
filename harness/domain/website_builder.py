@@ -30,6 +30,7 @@ from harness.services.worker import Worker
 ALLOW_LIST: list[str] = [
     "ask_user",
     "request_approval",
+    "save_business_brief",
     "render_mockup",
     "read_file",
     "write_file",
@@ -125,6 +126,12 @@ def build_system_prompt() -> str:
         "  request_approval (not ask_user) when seeking sign-off on a\n"
         "  structured object like the Business Brief — the UI renders the\n"
         "  `details` dict as a clean card.\n"
+        "- save_business_brief(brief) — persist the brief into session memory\n"
+        "  after the user has explicitly approved it. Call this once approval\n"
+        "  is granted so downstream tools (render_mockup uses it for theming)\n"
+        "  see the user's actual business name, palette, and other details.\n"
+        "  The brief should be the FULL collected dict (name, industry,\n"
+        "  tagline, contact, palette, pages, primary_cta, etc).\n"
         "- render_mockup(layout_spec) — render the layout as an ASCII mockup.\n"
         "- read_file(path) — read a file from the site sandbox.\n"
         "- write_file(path, content) — write a file to the site sandbox.\n"
@@ -148,6 +155,13 @@ def build_system_prompt() -> str:
         '"What industry is this?","options":["Restaurant","Coffee shop",'
         '"Photographer","Home service","Influencer"]}}\n'
         "\n"
+        "Example 1d (persisting the brief after the user said 'Looks good!'):\n"
+        '{"type":"tool_call","tool":"save_business_brief","args":{"brief":'
+        '{"name":"Jim\'s HVAC","industry":"Home service","palette":'
+        '{"primary":"#0055aa","secondary":"#ffffff"},'
+        '"primary_cta":"Call for a free quote",'
+        '"pages":["Home","Services","Contact"]}}}\n'
+        "\n"
         "Example 2 (writing a tiny HTML file):\n"
         '{"type":"tool_call","tool":"write_file","args":{"path":"index.html",'
         '"content":"<!DOCTYPE html><html lang=\\"en\\"><head>'
@@ -159,8 +173,11 @@ def build_system_prompt() -> str:
         "\n"
         "# Flow guidance\n"
         "1. Bootstrap stage: collect/confirm the business brief via batched\n"
-        "   ask_user rounds (2-4 questions each), then request_approval\n"
-        "   (subject='business_brief').\n"
+        "   ask_user rounds (2-4 questions each), then seek sign-off. Once the\n"
+        "   user has approved the brief (via 'Looks good!' / 'Yes' / 'Approved'\n"
+        "   / etc.), IMMEDIATELY call save_business_brief(brief={...full\n"
+        "   collected dict...}). Then call request_approval(subject='business_brief',\n"
+        "   details=brief) to formally close out the bootstrap stage.\n"
         "2. Mockup stage: design the layout, call render_mockup with the\n"
         "   layout_spec (sections list + primary_cta), then request_approval\n"
         "   (subject='mockup').\n"

@@ -20,6 +20,7 @@ from harness.services.tools import (
 ALL_TOOLS = [
     "ask_user",
     "request_approval",
+    "save_business_brief",
     "read_file",
     "write_file",
     "list_files",
@@ -622,3 +623,80 @@ def test_render_mockup_uses_persisted_brief_after_approval(
     assert "#ffffff" in html_doc
     # The seed placeholder is not present in the rendered HTML.
     assert "Maria&#x27;s Pizzeria" not in html_doc
+
+
+# ---------------------------------------------------------------------------
+# save_business_brief
+# ---------------------------------------------------------------------------
+
+
+def test_save_business_brief_persists_material(tmp_session, sandbox_dir):
+    _core, session_conn, _sid = tmp_session
+    ctx = make_ctx(tmp_session, sandbox_dir, stage="bootstrap")
+
+    brief = {
+        "name": "Jim's HVAC",
+        "industry": "Home service",
+        "palette": {"primary": "#0055aa", "secondary": "#ffffff"},
+        "primary_cta": "Call for a free quote",
+        "pages": ["Home", "Services", "Contact"],
+    }
+    result = dispatch("save_business_brief", {"brief": brief}, ctx)
+
+    out = _ok(result)
+    assert "material_id" in out
+    assert set(out["fields"]) == set(brief.keys())
+
+    row = store.load_material(session_conn, out["material_id"])
+    assert row is not None
+    assert row["type"] == MaterialType.BUSINESS_BRIEF.value
+    assert row["direction"] == "out"
+    assert row["stage"] == "bootstrap"
+    assert row["pending"] is False
+    assert row["content"] == brief
+
+
+def test_save_business_brief_rejects_missing_brief(tmp_session, sandbox_dir):
+    ctx = make_ctx(tmp_session, sandbox_dir)
+    result = dispatch("save_business_brief", {}, ctx)
+    assert _err(result)["error_kind"] == "bad_args"
+
+
+def test_save_business_brief_rejects_non_dict_brief(tmp_session, sandbox_dir):
+    ctx = make_ctx(tmp_session, sandbox_dir)
+    result = dispatch("save_business_brief", {"brief": "string"}, ctx)
+    assert _err(result)["error_kind"] == "bad_args"
+
+
+def test_save_business_brief_rejects_empty_dict(tmp_session, sandbox_dir):
+    ctx = make_ctx(tmp_session, sandbox_dir)
+    result = dispatch("save_business_brief", {"brief": {}}, ctx)
+    assert _err(result)["error_kind"] == "bad_args"
+
+
+def test_save_business_brief_appears_in_registry():
+    assert "save_business_brief" in REGISTRY
+
+
+def test_render_mockup_uses_brief_persisted_via_save_business_brief(
+    tmp_session, sandbox_dir
+):
+    """End-to-end: agent persists the brief via save_business_brief, then
+    render_mockup picks it up via _latest_business_brief."""
+    ctx = make_ctx(tmp_session, sandbox_dir, stage="bootstrap")
+
+    brief = {
+        "name": "Jim",
+        "palette": {"primary": "#0055aa", "secondary": "#ffffff"},
+    }
+    save_result = dispatch("save_business_brief", {"brief": brief}, ctx)
+    _ok(save_result)
+
+    mockup_ctx = make_ctx(tmp_session, sandbox_dir, stage="mockup")
+    mockup_result = dispatch("render_mockup", {"layout_spec": _spec()}, mockup_ctx)
+    out = _ok(mockup_result)
+
+    assert out["themed"] is True
+    html_doc = out["html"]
+    assert "Jim" in html_doc
+    assert "#0055aa" in html_doc

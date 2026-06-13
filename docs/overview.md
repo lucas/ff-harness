@@ -13,9 +13,10 @@ A **durable, resumable run orchestrator**. Each run is a **session** with its ow
 
 **1. The Loop.** The bounded control cycle that drives the agent each turn: call the worker → validate its JSON output → dispatch (run a tool / finish / **escalate to ask the user**) → verify & persist → advance or recover. Resumable from any checkpoint; capped so a confused agent can't run away.
 
-**2. Tools.** Typed functions the agent can call; the harness validates arguments, executes, and returns results as data. For the website builder, the 6 worker-callable tools are:
+**2. Tools.** Typed functions the agent can call; the harness validates arguments, executes, and returns results as data. For the website builder, the 7 worker-callable tools are:
 - `ask_user` — ask the user clarifying questions
 - `request_approval` — show the ASCII mockup, await sign-off
+- `save_business_brief` — persist the user-approved brief into session memory
 - `render_mockup` — ASCII wireframe from the layout spec
 - `read_file` / `write_file` / `list_files` — sandboxed page-file I/O
 

@@ -12,7 +12,7 @@ This document is the **source of truth** for the v1 Harness MVP. It defines the 
 - Pydantic-typed worker envelope (`Message`, `WorkerContext`, `ToolCall`/`Final`/`Escalate`).
 - Two `LLMWorker` instances (chat + code) over OpenRouter, env-configurable, with **free→paid 429 auto-swap**.
 - `MockWorker` for tests and dev iteration.
-- 6 worker-callable tools: `ask_user`, `request_approval`, `render_mockup`, `read_file`, `write_file`, `list_files`.
+- 7 worker-callable tools: `ask_user`, `request_approval`, `save_business_brief`, `render_mockup`, `read_file`, `write_file`, `list_files`.
 - **Auto post-hook chain** after every successful `write_file`: validate → regen SEO → git commit.
 - 5 deterministic checkpoints: `business_brief_confirmed`, `mockup_renders`, `mockup_approved`, `site_valid`, `seo_artifacts_present`.
 - 4 named alarms: `iteration_limit_reached`, `spend_cap_reached`, `output_schema_violation`, `tool_failed`.
@@ -53,6 +53,7 @@ harness/
     tools/
       __init__.py               # ToolContext, ToolResult, dispatch()
       user.py                   # ask_user, request_approval
+      brief.py                  # save_business_brief
       files.py                  # read_file, write_file, list_files (sandboxed)
       mockup.py                 # render_mockup
     validators.py               # html5lib / tinycss2 / xml.etree pure functions
@@ -253,7 +254,7 @@ WorkerResponse = Annotated[ToolCall | Final | Escalate, Field(discriminator='typ
 
 | `type` | `direction` | When created | `content` shape |
 |---|---|---|---|
-| `business_brief` | out | user approves `request_approval(subject='business_brief', details={...})` — orchestrator persists `details` as a new `business_brief` material so downstream tools (`render_mockup`) see the user's actual brief. POST `/sessions` does NOT auto-seed this material. | the brief dict (industry, name, contact, pages, palette, ...) |
+| `business_brief` | out | user approves `request_approval(subject='business_brief', details={...})` — orchestrator persists `details` as a new `business_brief` material so downstream tools (`render_mockup`) see the user's actual brief. POST `/sessions` does NOT auto-seed this material. May also be persisted by the agent directly via the `save_business_brief` tool (the preferred path when approval flows through `ask_user` with yes/no options instead of `request_approval`). | the brief dict (industry, name, contact, pages, palette, ...) |
 | `pending_question` | out | `ask_user` or `request_approval` invoked | `{question, options?}` |
 | `user_answer` | in | `/answer` POST | `{answer_text}` |
 | `user_approval` | in | `/answer` POST for approval | `{approved: bool, notes?}` |
@@ -289,14 +290,15 @@ Each alarm row: `{id, type, severity, context, recommended_action, stage, trigge
 
 `iteration_limit_reached` and `spend_cap_reached` are state-based and auto-resolve when the condition no longer holds (checked at the start of `run_until_pause`). `tool_failed` and `output_schema_violation` are event-based and stay `resolved=0` until explicitly resolved.
 
-## 10. The 6 tools
+## 10. The 7 tools
 
-All six are worker-callable. `ask_user` and `request_approval` are escalation surfaces (write `pending_question` material + return paused sentinel). `write_file` triggers the post-hook chain. SEO regen, validation, and git commit are **not** in the tool list — they are post-hooks (§11).
+All seven are worker-callable. `ask_user` and `request_approval` are escalation surfaces (write `pending_question` material + return paused sentinel). `save_business_brief` writes the user-approved brief into session memory (so `render_mockup` and other downstream tools see the user's actual business info regardless of whether approval came via `request_approval` or via `ask_user`). `write_file` triggers the post-hook chain. SEO regen, validation, and git commit are **not** in the tool list — they are post-hooks (§11).
 
 | Tool | Args shape | Returns shape | Sandboxed? | Triggers post-hooks? |
 |---|---|---|---|---|
 | `ask_user` | `{question: str, options?: list[str]}` | `ToolResult(ok=True, result={paused: True, material_id})` | n/a | no |
 | `request_approval` | `{summary: str, payload: dict}` | `ToolResult(ok=True, result={paused: True, material_id})` | n/a | no |
+| `save_business_brief` | `{brief: dict}` | `ToolResult(ok=True, result={material_id, fields: list[str]})` | n/a | no |
 | `render_mockup` | `{layout_spec: dict}` | `ToolResult(ok=True, result={ascii, regions, html, themed})` (themed iff a `business_brief` material is on file; HTML is a self-contained `<!doctype html>` document for iframe preview) | n/a | no |
 | `read_file` | `{path: str}` | `ToolResult(ok=True, result={content: str})` | yes (sandbox_path) | no |
 | `write_file` | `{path: str, content: str}` | `ToolResult(ok=True, result={path, bytes})` | yes (sandbox_path) | **yes** |
