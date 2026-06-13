@@ -1,9 +1,220 @@
-{# Polling-refresh region for session.html. Renders cost, models, checkpoints, #}
-{# alarms, events. Excludes the pending-question forms (those live in the     #}
-{# parent so user typing isn't lost on refresh). Also rendered alone when     #}
-{# `?partial=1` is set on the GET /sessions/{id}/view route.                   #}
+{# Chat-first session-detail body. Rendered:                            #}
+{#   - in full by session.html (extends _base.html)                      #}
+{#   - alone when ?partial=1 (no <html>/<body>, no inline JS)            #}
+{# Sections: chat panel (log + input), details accordion, footer cards. #}
 
-{# ---- Cost summary ---- #}
+{# ============================== Chat panel ============================= #}
+<section class="chat-panel" id="chat-panel">
+  <div class="chat-log" id="chat-log" aria-label="Conversation">
+    {% if conversation %}
+      {% for msg in conversation %}
+        <div class="chat-msg {{ msg.role }}">
+          {% if msg.ts %}<div class="chat-time">{{ msg.ts }}</div>{% endif %}
+          <div class="chat-bubble">{{ msg.body }}</div>
+          {% if msg.meta.tag %}
+            <span class="tag {{ msg.meta.tag }}">{{ msg.meta.tag }}</span>
+          {% endif %}
+          {% if msg.meta.options %}
+            <div class="chat-options">Options: {{ msg.meta.options | join(", ") }}</div>
+          {% endif %}
+          {% if msg.meta.details_json %}
+            <details style="margin-top:6px;">
+              <summary>Approval details</summary>
+              <pre>{{ msg.meta.details_json }}</pre>
+            </details>
+          {% endif %}
+        </div>
+      {% endfor %}
+    {% else %}
+      <div class="empty">No conversation yet. Click Resume to take the next turn.</div>
+    {% endif %}
+  </div>
+
+  {# ----------------------- Input area (context-sensitive) -------------- #}
+  <div class="chat-input" id="chat-input">
+    {% set active_pending = pending_materials[0] if pending_materials else None %}
+    {% set extra_pending_count = (pending_materials | length) - 1 if pending_materials else 0 %}
+
+    {% if session.status == "awaiting_human" and active_pending %}
+      {% set kind = active_pending.content.kind %}
+      {% if kind == "approval" %}
+        <form class="answer-form" data-material-id="{{ active_pending.id }}" data-is-approval="1" data-is-continuation="0">
+          <div class="pending-q">
+            <strong>Approval requested:</strong> {{ active_pending.content.subject }}
+          </div>
+          {% if active_pending.content.details %}
+            <details style="margin-bottom:8px;">
+              <summary>Details</summary>
+              <pre>{{ active_pending.content.details | tojson(indent=2) }}</pre>
+            </details>
+          {% endif %}
+          <label for="notes-{{ active_pending.id }}" class="muted">Notes (optional):</label>
+          <textarea id="notes-{{ active_pending.id }}" name="notes" placeholder="Optional notes for the agent..."></textarea>
+          <div class="row-actions">
+            <button type="submit" name="approved" value="true">Approve</button>
+            <button type="submit" name="approved" value="false" class="danger">Deny</button>
+          </div>
+          <div class="form-result muted" style="margin-top:6px;"></div>
+        </form>
+      {% elif kind == "continuation_approval" %}
+        <form class="answer-form" data-material-id="{{ active_pending.id }}" data-is-approval="1" data-is-continuation="1">
+          <div class="pending-q continuation">
+            {{ active_pending.content.question }}
+          </div>
+          <label for="notes-{{ active_pending.id }}" class="muted">Notes (optional):</label>
+          <textarea id="notes-{{ active_pending.id }}" name="notes" placeholder="Optional notes for the agent..."></textarea>
+          <div class="row-actions">
+            <button type="submit" name="approved" value="true">Approve</button>
+            <button type="submit" name="approved" value="false" class="danger">Stop</button>
+          </div>
+          <div class="form-result muted" style="margin-top:6px;"></div>
+        </form>
+      {% else %}
+        {# Freeform ask_user — with or without options #}
+        <form class="answer-form" data-material-id="{{ active_pending.id }}" data-is-approval="0">
+          <div class="pending-q">
+            <strong>Question:</strong> {{ active_pending.content.question }}
+          </div>
+          {% if active_pending.content.options %}
+            <div class="row-actions options-row" style="flex-wrap: wrap; gap: 8px;">
+              {% for opt in active_pending.content.options %}
+                <button type="submit" class="option-btn" data-option="{{ opt }}">{{ opt }}</button>
+              {% endfor %}
+              <button type="button" class="other-btn secondary" data-action="reveal-other">Other…</button>
+            </div>
+            <div class="other-input" style="display:none; margin-top:8px;">
+              <label for="answer-{{ active_pending.id }}" class="muted">Your answer:</label>
+              <textarea id="answer-{{ active_pending.id }}" name="answer_text" placeholder="Type your answer..."></textarea>
+              <div class="row-actions">
+                <button type="submit">Send</button>
+              </div>
+            </div>
+          {% else %}
+            <label for="answer-{{ active_pending.id }}" class="muted">Your answer:</label>
+            <textarea id="answer-{{ active_pending.id }}" name="answer_text" required></textarea>
+            <div class="row-actions">
+              <button type="submit">Send</button>
+            </div>
+          {% endif %}
+          <div class="form-result muted" style="margin-top:6px;"></div>
+        </form>
+      {% endif %}
+      {% if extra_pending_count > 0 %}
+        <div class="more-pending">
+          {{ extra_pending_count }} more pending — see the events list in
+          <a href="#details-section">Details</a>.
+        </div>
+      {% endif %}
+    {% elif session.status == "awaiting_human" %}
+      {# Edge case: paused but no pending material on file. #}
+      <div class="pending-q muted">Session is paused.</div>
+      <div class="row-actions">
+        <button id="resume-btn-input" type="button">Resume</button>
+      </div>
+    {% elif session.status == "active" %}
+      <textarea disabled placeholder="Click Resume to run the next turn"></textarea>
+      <div class="row-actions">
+        <button id="resume-btn-input" type="button">Resume</button>
+      </div>
+    {% elif session.status == "completed" %}
+      <textarea disabled placeholder="Session completed."></textarea>
+    {% elif session.status == "failed" %}
+      <textarea disabled placeholder="Session failed."></textarea>
+    {% else %}
+      <textarea disabled placeholder="Session is in state {{ session.status }}."></textarea>
+    {% endif %}
+  </div>
+</section>
+
+{# ============================== Details accordion ====================== #}
+<details id="details-section" style="margin-bottom: 16px;">
+  <summary><strong>Details</strong> — events, checkpoints, models{% if has_site_files %}, site preview{% endif %}</summary>
+
+  {# ---- Active models ---- #}
+  <div class="card" id="models-card" style="margin-top: 12px;">
+    <h2>Active models</h2>
+    <table>
+      <thead><tr><th>Role</th><th>Primary</th><th>Fallback</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>Chat</td>
+          <td><code>{{ active_models.chat.primary }}</code>
+            {% if swapped_in_session %}<span class="badge swapped" title="A model swap fired this session">swapped this session</span>{% endif %}
+          </td>
+          <td><code>{{ active_models.chat.fallback }}</code></td>
+        </tr>
+        <tr>
+          <td>Code</td>
+          <td><code>{{ active_models.code.primary }}</code></td>
+          <td><code>{{ active_models.code.fallback }}</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  {# ---- Checkpoints ---- #}
+  <div class="card" id="checkpoints-card">
+    <h2>Checkpoints</h2>
+    {% if checkpoints %}
+      <table>
+        <thead><tr><th>Name</th><th>Stage</th><th>Status</th><th>When</th></tr></thead>
+        <tbody>
+          {% for c in checkpoints %}
+            <tr>
+              <td>{{ c.name }}</td>
+              <td><span class="badge stage">{{ c.stage }}</span></td>
+              <td><span class="badge {{ c.status }}">{{ c.status }}</span></td>
+              <td class="muted">{{ c.created_at }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <div class="empty">No checkpoints yet.</div>
+    {% endif %}
+  </div>
+
+  {# ---- Events timeline (per-type summaries, no JSON expanders) ---- #}
+  <div class="card" id="events-card">
+    <h2>Events</h2>
+    {% if formatted_events %}
+      {% if events_truncated %}
+        <p class="events-truncated-note">
+          showing {{ formatted_events | length }} most recent of {{ events_total }} events
+        </p>
+      {% endif %}
+      <table>
+        <thead><tr><th>Time</th><th>Type</th><th>Summary</th></tr></thead>
+        <tbody>
+          {% for e in formatted_events %}
+            <tr class="event-row event-{{ e.type }} {% if e.highlight %}highlight{% endif %}">
+              <td class="muted" style="white-space:nowrap;font-variant-numeric:tabular-nums;">{{ e.time }}</td>
+              <td><span class="badge {{ e.badge_class }}">{{ e.type }}</span></td>
+              <td>{{ e.summary }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <div class="empty">No events yet.</div>
+    {% endif %}
+  </div>
+
+  {# ---- Site preview (conditional) ---- #}
+  {% if has_site_files %}
+    <div class="card" id="site-preview-card">
+      <h2>Site preview</h2>
+      {% if has_site_preview %}
+        <iframe src="/sites/{{ session.id }}/index.html" width="100%" height="600"
+                style="border:1px solid var(--border); border-radius:4px;"></iframe>
+      {% else %}
+        <div class="muted">Site files exist but no index.html at the root.</div>
+      {% endif %}
+    </div>
+  {% endif %}
+</details>
+
+{# ============================== Footer: cost + alarms ================== #}
 <div class="card" id="cost-card">
   <h2>Cost</h2>
   <p><strong>Total:</strong> ${{ "%.4f" | format(spend_summary.total_usd) }}
@@ -25,54 +236,6 @@
   {% endif %}
 </div>
 
-{# ---- Active models ---- #}
-<div class="card" id="models-card">
-  <h2>Active models</h2>
-  <table>
-    <thead><tr><th>Role</th><th>Primary</th><th>Fallback</th></tr></thead>
-    <tbody>
-      <tr>
-        <td>Chat</td>
-        <td><code>{{ models.chat_primary or "(unset)" }}</code></td>
-        <td><code>{{ models.chat_fallback or "(none)" }}</code></td>
-      </tr>
-      <tr>
-        <td>Code</td>
-        <td><code>{{ models.code_primary or "(unset)" }}</code></td>
-        <td><code>{{ models.code_fallback or "(none)" }}</code></td>
-      </tr>
-    </tbody>
-  </table>
-</div>
-
-{# ---- Checkpoints ---- #}
-<div class="card" id="checkpoints-card">
-  <h2>Checkpoints</h2>
-  {% if checkpoints %}
-    <table>
-      <thead><tr><th>Name</th><th>Stage</th><th>Status</th><th>Criteria</th></tr></thead>
-      <tbody>
-        {% for c in checkpoints %}
-          <tr>
-            <td>{{ c.name }}</td>
-            <td><span class="badge stage">{{ c.stage }}</span></td>
-            <td><span class="badge {{ c.status }}">{{ c.status }}</span></td>
-            <td>
-              <details>
-                <summary>{{ c.criteria_results | length }} criteria</summary>
-                <pre>{{ c.criteria_results | tojson(indent=2) }}</pre>
-              </details>
-            </td>
-          </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  {% else %}
-    <div class="empty">No checkpoints yet.</div>
-  {% endif %}
-</div>
-
-{# ---- Alarms (unresolved first) ---- #}
 <div class="card" id="alarms-card">
   <h2>Alarms</h2>
   {% if alarms %}
@@ -80,17 +243,11 @@
       <thead><tr><th>Type</th><th>Severity</th><th>Stage</th><th>Recommended action</th><th>Resolved</th></tr></thead>
       <tbody>
         {% for a in alarms %}
-          <tr>
+          <tr style="border-left: 4px solid {% if a.severity == 'critical' %}var(--critical){% elif a.severity == 'error' %}var(--fail){% else %}var(--warn){% endif %};">
             <td>{{ a.type }}</td>
             <td><span class="badge {{ a.severity }}">{{ a.severity }}</span></td>
             <td><span class="badge stage">{{ a.stage }}</span></td>
-            <td>
-              {{ a.recommended_action }}
-              <details>
-                <summary>Context</summary>
-                <pre>{{ a.context | tojson(indent=2) }}</pre>
-              </details>
-            </td>
+            <td>{{ a.recommended_action }}</td>
             <td>{{ "yes" if a.resolved else "no" }}</td>
           </tr>
         {% endfor %}
@@ -100,41 +257,3 @@
     <div class="empty">No alarms.</div>
   {% endif %}
 </div>
-
-{# ---- Events timeline ---- #}
-<div class="card" id="events-card">
-  <h2>Events</h2>
-  {% if events %}
-    {% if events_truncated %}
-      <p class="muted">Showing {{ events | length }} of {{ events_total }} most recent events.</p>
-    {% endif %}
-    <table>
-      <thead><tr><th>Time</th><th>Type</th><th>Stage</th><th>Payload</th></tr></thead>
-      <tbody>
-        {% for e in events %}
-          <tr class="event-row event-{{ e.type }}">
-            <td class="muted">{{ e.ts }}</td>
-            <td><span class="badge neutral">{{ e.type }}</span></td>
-            <td><span class="badge stage">{{ e.stage }}</span></td>
-            <td>
-              <details>
-                <summary>{{ event_summaries[loop.index0] }}</summary>
-                <pre>{{ e.payload | tojson(indent=2) }}</pre>
-              </details>
-            </td>
-          </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  {% else %}
-    <div class="empty">No events yet.</div>
-  {% endif %}
-</div>
-
-{# ---- Generated site preview ---- #}
-{% if has_site_preview %}
-<div class="card" id="site-preview-card">
-  <h2>Site preview</h2>
-  <iframe src="/sites/{{ session.id }}/index.html" width="100%" height="600" style="border:1px solid var(--border); border-radius:4px;"></iframe>
-</div>
-{% endif %}

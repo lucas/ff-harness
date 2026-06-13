@@ -415,6 +415,73 @@ def test_400_on_answer_without_material_id(make_client):
     assert isinstance(body["detail"], dict)
 
 
+def test_answer_continuation_approval_resets_iter_counter(
+    make_client, tmp_path: Path
+):
+    """Full HTTP path: trip the iter cap, approve via /answer, verify reset.
+
+    Drives MockWorker for two ToolCall turns -> Final. We pre-set
+    iter_since_approval to the cap so the first /resume call lands directly
+    on the iter-cap branch (which now persists a pending continuation
+    material). POST /answer with approved=True flows through the existing
+    approval handler; the orchestrator's Issue-1 fix resets the counter on
+    the next turn's human_resumed processing.
+    """
+    scripted: list[ToolCall | Final | Escalate] = [
+        Final(summary="resumed after cap"),
+    ]
+    client = make_client(scripted)
+    sid = client.post("/sessions", json={}).json()["session_id"]
+
+    # Reach into the core DB to force iter_since_approval = cap.
+    core_db = tmp_path / "data" / "harness.db"
+    assert core_db.is_file()
+    conn = store.core_connection(core_db)
+    try:
+        store.update_session_status(
+            conn, sid, "active", iter_since_approval=10
+        )
+    finally:
+        conn.close()
+
+    # First resume hits the iter cap. The orchestrator persists a
+    # continuation_approval pending material.
+    r1 = client.post(f"/sessions/{sid}/resume", json={})
+    assert r1.status_code == 200
+    assert r1.json()["status"] == "awaiting_human"
+    assert r1.json()["paused_reason"] == "turn_cap"
+
+    detail = client.get(f"/sessions/{sid}").json()
+    pending = detail["pending_materials"]
+    cont = [
+        m for m in pending if m["content"].get("kind") == "continuation_approval"
+    ]
+    assert len(cont) == 1, f"expected 1 continuation_approval, got {pending}"
+    pending_id = cont[0]["id"]
+
+    # Approve the continuation via /answer. The endpoint's `is_approval`
+    # check was widened to accept continuation_approval, so this body shape
+    # (with `approved` and no `answer_text`) is valid.
+    r2 = client.post(
+        f"/sessions/{sid}/answer",
+        json={"material_id": pending_id, "approved": True},
+    )
+    assert r2.status_code == 200, r2.text
+    body = r2.json()
+    # The Final fires on the next worker turn after the approval is folded
+    # in, so the resulting RunResult is terminal.
+    assert body["status"] == "completed"
+
+    # Inspect the final session row directly: iter_since_approval was reset.
+    conn = store.core_connection(core_db)
+    try:
+        session_row = store.load_session(conn, sid)
+    finally:
+        conn.close()
+    assert session_row is not None
+    assert int(session_row["iter_since_approval"]) == 0
+
+
 def test_400_on_answer_to_approval_without_approved(make_client):
     """Pending approval requires `approved` in the body; otherwise 400."""
     scripted: list[ToolCall | Final | Escalate] = [

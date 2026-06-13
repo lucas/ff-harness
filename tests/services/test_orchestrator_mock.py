@@ -697,9 +697,22 @@ def test_alarm_iteration_limit_reached(orchestrator_setup):
 
     with setup["session_conn_factory"]() as session_conn:
         rows = store.load_alarms(session_conn)
+        pending = store.load_pending_materials(session_conn)
     assert any(
         r["type"] == AlarmType.ITERATION_LIMIT_REACHED.value for r in rows
     )
+    # A pending continuation_approval material should also be persisted so the
+    # UI can render an "approve / stop" affordance for the operator.
+    cont = [
+        m
+        for m in pending
+        if m["type"] == MaterialType.PENDING_QUESTION.value
+        and isinstance(m.get("content"), dict)
+        and m["content"].get("kind") == "continuation_approval"
+    ]
+    assert len(cont) == 1
+    assert cont[0]["content"].get("iter_count") == 10
+    assert "autonomous iterations" in cont[0]["content"].get("question", "")
 
 
 def test_alarm_spend_cap_reached(orchestrator_setup):
@@ -810,6 +823,298 @@ def test_alarm_tool_failed_denied_tool(orchestrator_setup):
 # ---------------------------------------------------------------------------
 # No-op resume on already-terminal session
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Issue 1 + Issue 2 regression tests
+# ---------------------------------------------------------------------------
+
+
+def _last_pending_continuation_material_id(session_conn: sqlite3.Connection) -> str:
+    """Find the most recent pending continuation_approval material."""
+    pending = store.load_pending_materials(session_conn)
+    for m in reversed(pending):
+        if (
+            m["type"] == MaterialType.PENDING_QUESTION.value
+            and isinstance(m.get("content"), dict)
+            and m["content"].get("kind") == "continuation_approval"
+        ):
+            return m["id"]
+    raise AssertionError("no pending continuation_approval material present")
+
+
+def test_iter_counter_resets_on_any_human_input(orchestrator_setup):
+    """A run of N ask_user turns must NOT trip the iter cap.
+
+    Each user_answer (kind != 'approval') is a human input and must reset
+    iter_since_approval to 0 so the cap can never fire during an active
+    Q&A bootstrap exchange.
+    """
+    setup = orchestrator_setup
+    session_id = setup["session_id"]
+
+    # 5 ask_user turns followed by a Final to terminate. Each ask_user pauses
+    # the loop; the test drives an answer between pauses.
+    n_questions = 5
+    scripted: list[ToolCall | Final | Escalate] = [
+        ToolCall(
+            tool="ask_user",
+            args={"question": f"question {i + 1}?"},
+        )
+        for i in range(n_questions)
+    ]
+    scripted.append(Final(summary="done collecting answers."))
+
+    worker = MockWorker(scripted_responses=scripted)
+    workers_by_stage = {Stage.BOOTSTRAP.value: worker}
+    config = _build_config(
+        core_db_path=setup["core_db_path"],
+        sessions_dir=setup["sessions_dir"],
+        sandbox_root=setup["sandbox_root"],
+        workers_by_stage=workers_by_stage,
+        turn_cap=3,  # deliberately small — proves the counter resets.
+    )
+
+    for i in range(n_questions):
+        result = run_until_pause(session_id, config)
+        assert result.status == SessionStatus.AWAITING_HUMAN.value
+        assert result.paused_reason == PAUSE_AWAITING_HUMAN, (
+            f"unexpected pause reason at question {i + 1}: {result.paused_reason}"
+        )
+        # Right after an ask_user pause, the orchestrator bumped iter to
+        # iter_count+1 (= 1 for the first turn of a freshly-reset counter).
+        session_row = store.load_session(setup["core_conn"], session_id)
+        assert session_row is not None
+        assert int(session_row["iter_since_approval"]) <= 1, (
+            f"iter_since_approval climbed to {session_row['iter_since_approval']}"
+            f" after question {i + 1} — counter should have been reset"
+        )
+
+        with setup["session_conn_factory"]() as session_conn:
+            pending_mid = _last_awaiting_pending_material_id(session_conn)
+            _simulate_human_answer(
+                setup["core_conn"],
+                session_conn,
+                session_id,
+                pending_material_id=pending_mid,
+                answer_text=f"answer {i + 1}",
+                stage=Stage.BOOTSTRAP.value,
+            )
+
+        # After the simulated answer is appended (and before the next
+        # run_until_pause), iter_since_approval has not yet been reset
+        # (that happens inside the orchestrator's resume-folding step).
+        # We assert the state AFTER the next run instead — see top of loop.
+
+    # 6th call drains the Final. No iter cap should have tripped.
+    final_result = run_until_pause(session_id, config)
+    assert final_result.status == SessionStatus.COMPLETED.value
+    assert final_result.terminal is True
+
+    with setup["session_conn_factory"]() as session_conn:
+        alarms_rows = store.load_alarms(session_conn)
+    assert not any(
+        r["type"] == AlarmType.ITERATION_LIMIT_REACHED.value
+        for r in alarms_rows
+    ), "iteration_limit_reached alarm fired despite continuous human input"
+
+
+def test_continuation_approval_resumes_after_iter_cap(orchestrator_setup):
+    """Trip the iter cap; approve the continuation; the loop must proceed."""
+    setup = orchestrator_setup
+    session_id = setup["session_id"]
+    # Force the cap at session entry.
+    store.update_session_status(
+        setup["core_conn"],
+        session_id,
+        SessionStatus.ACTIVE.value,
+        iter_since_approval=10,
+    )
+    # After the cap-pause + user approval, the orchestrator should proceed
+    # to the Final on the next loop iteration.
+    worker = MockWorker(scripted_responses=[Final(summary="resumed after cap")])
+    workers_by_stage = {Stage.BOOTSTRAP.value: worker}
+    config = _build_config(
+        core_db_path=setup["core_db_path"],
+        sessions_dir=setup["sessions_dir"],
+        sandbox_root=setup["sandbox_root"],
+        workers_by_stage=workers_by_stage,
+        turn_cap=10,
+    )
+
+    r1 = run_until_pause(session_id, config)
+    assert r1.status == SessionStatus.AWAITING_HUMAN.value
+    assert r1.paused_reason == PAUSE_TURN_CAP
+
+    # Find + approve the continuation_approval pending material.
+    with setup["session_conn_factory"]() as session_conn:
+        pending_mid = _last_pending_continuation_material_id(session_conn)
+        _simulate_human_approval(
+            setup["core_conn"],
+            session_conn,
+            session_id,
+            pending_material_id=pending_mid,
+            approved=True,
+            subject="continuation",  # unknown-subject path; counter still resets
+            stage=Stage.BOOTSTRAP.value,
+        )
+        # Patch the persisted approval content to carry the continuation
+        # kind so the orchestrator's denial-detection branch sees it on
+        # subsequent runs. The helper hardcodes kind='approval', which is
+        # fine for this APPROVED case (the orchestrator only checks for
+        # kind == continuation_approval AND approved is False to deny).
+
+    # Counter should be zero after the approval is folded in; loop completes.
+    r2 = run_until_pause(session_id, config)
+    assert r2.status == SessionStatus.COMPLETED.value
+    assert r2.terminal is True
+
+    session_row = store.load_session(setup["core_conn"], session_id)
+    assert session_row is not None
+    assert int(session_row["iter_since_approval"]) == 0
+
+
+def test_continuation_approval_denial_keeps_session_paused(orchestrator_setup):
+    """Denying the continuation_approval must keep status awaiting_human.
+
+    Implemented policy (option A): when a continuation_approval is denied
+    (approved=False), the orchestrator reverts session status to
+    awaiting_human and does NOT reset the iter counter. Subsequent
+    run_until_pause calls no-op until the operator does something else
+    (e.g. manually approves a later continuation). No further worker
+    turns are taken.
+    """
+    setup = orchestrator_setup
+    session_id = setup["session_id"]
+    store.update_session_status(
+        setup["core_conn"],
+        session_id,
+        SessionStatus.ACTIVE.value,
+        iter_since_approval=10,
+    )
+    # MockWorker with no scripted responses — if the orchestrator tried
+    # to call act() after the denial, MockWorkerExhausted would fire and
+    # surface a worker_exception alarm. The test asserts neither happens.
+    worker = MockWorker(scripted_responses=[])
+    workers_by_stage = {Stage.BOOTSTRAP.value: worker}
+    config = _build_config(
+        core_db_path=setup["core_db_path"],
+        sessions_dir=setup["sessions_dir"],
+        sandbox_root=setup["sandbox_root"],
+        workers_by_stage=workers_by_stage,
+        turn_cap=10,
+    )
+
+    r1 = run_until_pause(session_id, config)
+    assert r1.status == SessionStatus.AWAITING_HUMAN.value
+    assert r1.paused_reason == PAUSE_TURN_CAP
+
+    # Deny the continuation. The helper uses kind='approval' by default;
+    # we patch the persisted material to kind='continuation_approval' so
+    # the orchestrator's denial branch matches.
+    with setup["session_conn_factory"]() as session_conn:
+        pending_mid = _last_pending_continuation_material_id(session_conn)
+        approval_mid = _simulate_human_approval(
+            setup["core_conn"],
+            session_conn,
+            session_id,
+            pending_material_id=pending_mid,
+            approved=False,
+            subject="continuation",
+            stage=Stage.BOOTSTRAP.value,
+        )
+        # Rewrite the material's content to carry the continuation_approval
+        # kind, mirroring what the real /answer route does.
+        import json as _json
+        session_conn.execute(
+            "UPDATE material SET content = ? WHERE id = ?",
+            (
+                _json.dumps(
+                    {
+                        "approved": False,
+                        "subject": "continuation",
+                        "kind": "continuation_approval",
+                        "notes": None,
+                    }
+                ),
+                approval_mid,
+            ),
+        )
+        session_conn.commit()
+
+    r2 = run_until_pause(session_id, config)
+    # The denial reverted status to awaiting_human; the second run sees the
+    # non-active session and returns immediately (no worker turns).
+    assert r2.status == SessionStatus.AWAITING_HUMAN.value
+    assert r2.turns_executed == 0
+
+    # iter_since_approval was NOT reset by denial.
+    session_row = store.load_session(setup["core_conn"], session_id)
+    assert session_row is not None
+    assert int(session_row["iter_since_approval"]) == 10
+
+    # No tool_failed / worker_exception alarms were raised by the denial.
+    with setup["session_conn_factory"]() as session_conn:
+        alarms_rows = store.load_alarms(session_conn)
+    tf = [r for r in alarms_rows if r["type"] == AlarmType.TOOL_FAILED.value]
+    assert tf == [], f"unexpected tool_failed alarm: {tf}"
+
+
+def test_spend_cap_persists_continuation_pending_material(orchestrator_setup):
+    """Tripping the rolling-24h spend cap must persist a continuation_approval."""
+    setup = orchestrator_setup
+    session_id = setup["session_id"]
+    now = datetime.now(timezone.utc)
+    store.record_spend(
+        setup["core_conn"],
+        session_id,
+        model="deepseek/deepseek-v4-flash",
+        tokens_in=1000,
+        tokens_out=200,
+        cost_usd=0.7,
+        ts=now - timedelta(minutes=10),
+    )
+    store.record_spend(
+        setup["core_conn"],
+        session_id,
+        model="qwen/qwen3-coder",
+        tokens_in=2000,
+        tokens_out=400,
+        cost_usd=0.4,
+        ts=now - timedelta(minutes=5),
+    )
+
+    worker = MockWorker(scripted_responses=[Final(summary="unused")])
+    workers_by_stage = {Stage.BOOTSTRAP.value: worker}
+    config = _build_config(
+        core_db_path=setup["core_db_path"],
+        sessions_dir=setup["sessions_dir"],
+        sandbox_root=setup["sandbox_root"],
+        workers_by_stage=workers_by_stage,
+        spend_cap_usd=1.0,
+    )
+
+    result = run_until_pause(session_id, config)
+    assert result.status == SessionStatus.AWAITING_HUMAN.value
+    assert result.paused_reason == PAUSE_SPEND_CAP
+
+    with setup["session_conn_factory"]() as session_conn:
+        pending = store.load_pending_materials(session_conn)
+    cont = [
+        m
+        for m in pending
+        if m["type"] == MaterialType.PENDING_QUESTION.value
+        and isinstance(m.get("content"), dict)
+        and m["content"].get("kind") == "continuation_approval"
+    ]
+    assert len(cont) == 1
+    question = cont[0]["content"].get("question", "")
+    # The question must reference the spent amount and the rolling-24h
+    # caveat so the operator understands continuing won't bypass the cap.
+    assert "$1.10" in question or "1.1" in question, (
+        f"spend amount not in question: {question!r}"
+    )
+    assert "rolling-24h" in question or "rolling" in question
 
 
 def test_noop_resume_on_completed_session(orchestrator_setup):

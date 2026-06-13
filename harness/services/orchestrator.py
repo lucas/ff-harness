@@ -156,6 +156,29 @@ def _run_loop(
                 cap_usd=config.spend_cap_usd,
                 stage=stage,
             )
+            # Persist a pending continuation_approval material so the UI can
+            # render an "approve / stop" affordance. Caveat: the spend cap is
+            # rolling-24h, so approving here keeps tripping the cap until the
+            # window rolls — the question text says so explicitly.
+            store.persist_material(
+                session_conn,
+                direction=Direction.OUT.value,
+                stage=stage,
+                type=MaterialType.PENDING_QUESTION.value,
+                content={
+                    "kind": "continuation_approval",
+                    "question": (
+                        f"The agent has spent ${spent:.4f} today and hit the"
+                        f" daily cap (${config.spend_cap_usd:.4f}). Approving"
+                        " continues anyway, but the cap is rolling-24h so the"
+                        " session will keep tripping until the window rolls."
+                        " Continue, or stop?"
+                    ),
+                    "spent_usd": spent,
+                    "cap_usd": config.spend_cap_usd,
+                },
+                pending=True,
+            )
             store.update_session_status(
                 core_conn, session_id, SessionStatus.AWAITING_HUMAN.value
             )
@@ -176,6 +199,24 @@ def _run_loop(
                 iter_count=iter_count,
                 last_checkpoint=last_checkpoint,
                 stage=stage,
+            )
+            # Persist a pending continuation_approval material so the UI can
+            # render an "approve / stop" affordance.
+            store.persist_material(
+                session_conn,
+                direction=Direction.OUT.value,
+                stage=stage,
+                type=MaterialType.PENDING_QUESTION.value,
+                content={
+                    "kind": "continuation_approval",
+                    "question": (
+                        f"The agent has run {iter_count} autonomous iterations"
+                        " since your last input and hit the safety cap."
+                        " Approve another 10 iterations, or stop?"
+                    ),
+                    "iter_count": iter_count,
+                },
+                pending=True,
             )
             store.update_session_status(
                 core_conn, session_id, SessionStatus.AWAITING_HUMAN.value
@@ -650,6 +691,11 @@ def _consume_resume_if_present(
     if latest["type"] != EventType.HUMAN_RESUMED.value:
         return
 
+    session = store.load_session(core_conn, session_id)
+    if session is None:
+        return
+    stage = session["current_stage"]
+
     payload = latest["payload"]
     if not isinstance(payload, dict):
         return
@@ -658,33 +704,65 @@ def _consume_resume_if_present(
         return
 
     answer_material = store.load_material(session_conn, material_id)
-    if answer_material is None:
+    content = answer_material.get("content") if answer_material else None
+    content_dict = content if isinstance(content, dict) else None
+
+    # Denial of a continuation_approval keeps the session paused — the user
+    # said "stop" so we must not reset the counter or flip back to active.
+    # The /answer route already flipped status to active before calling us;
+    # revert that here so the next run_until_pause call no-ops.
+    if (
+        content_dict is not None
+        and content_dict.get("kind") == "continuation_approval"
+        and content_dict.get("approved") is False
+    ):
+        store.update_session_status(
+            core_conn,
+            session_id,
+            SessionStatus.AWAITING_HUMAN.value,
+        )
         return
-    content = answer_material.get("content")
-    if not isinstance(content, dict):
+
+    # Issue 1 fix: ANY fresh human_resumed event means a human just intervened,
+    # so the "autonomous iterations between human inputs" counter must reset.
+    # We do this BEFORE the approval-specific branching below so even plain
+    # ask_user answers (which need no checkpoint) zero the counter.
+    if int(session["iter_since_approval"]) != 0:
+        store.update_session_status(
+            core_conn,
+            session_id,
+            session["status"],
+            iter_since_approval=0,
+        )
+        # Reload so downstream stage-advance writes see the zeroed counter
+        # and don't accidentally clobber it with a stale value.
+        session = store.load_session(core_conn, session_id)
+        if session is None:
+            return
+
+    if answer_material is None or content_dict is None:
         return
 
     # We only act on approval-shaped resumes; plain ask_user answers feed
     # back into the worker via message history and need no checkpoint here.
     is_approval = (
         answer_material.get("type") == MaterialType.USER_APPROVAL.value
-        or content.get("kind") == "approval"
+        or content_dict.get("kind") == "approval"
     )
     if not is_approval:
         return
 
-    approved = bool(content.get("approved"))
-    subject = content.get("subject")
-    session = store.load_session(core_conn, session_id)
-    if session is None:
-        return
-    stage = session["current_stage"]
+    approved = bool(content_dict.get("approved"))
+    subject = content_dict.get("subject")
 
     # If this resume has already been folded in (i.e. a checkpoint of the
     # matching name was written after the human_resumed event), skip.
     if _checkpoint_after(session_conn, latest["id"], subject):
         return
 
+    # Note: iter_since_approval was already reset to 0 above for ANY
+    # human_resumed event; the branches below only handle approval-specific
+    # checkpoint evaluation and stage advancement.
     if subject == "business_brief":
         brief_material = _latest_brief_material(session_conn)
         result = checkpoints.evaluate_business_brief_confirmed(
@@ -707,7 +785,7 @@ def _consume_resume_if_present(
             session_id,
             SessionStatus.ACTIVE.value,
             current_stage=new_stage,
-            iter_since_approval=0 if approved else session["iter_since_approval"],
+            iter_since_approval=0,
         )
     elif subject == "mockup":
         result = checkpoints.evaluate_mockup_approved(
@@ -729,16 +807,17 @@ def _consume_resume_if_present(
             session_id,
             SessionStatus.ACTIVE.value,
             current_stage=new_stage,
-            iter_since_approval=0 if approved else session["iter_since_approval"],
+            iter_since_approval=0,
         )
     else:
-        # Unknown approval subject: still reset iter_since_approval since a
-        # human just intervened.
+        # Unknown approval subject (e.g. continuation_approval): no stage
+        # advance, no checkpoint — but flip to active so the loop resumes.
+        # The counter was already zeroed above.
         store.update_session_status(
             core_conn,
             session_id,
             SessionStatus.ACTIVE.value,
-            iter_since_approval=0 if approved else session["iter_since_approval"],
+            iter_since_approval=0,
         )
 
 

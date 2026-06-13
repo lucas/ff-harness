@@ -7,7 +7,7 @@ This file is the live state of the v1 build. It is self-sufficient: after `/clea
 - **Last updated:** 2026-06-13
 - **Current step:** v1 COMPLETE — Steps 0-11 done. Step 12 polish remains optional.
 - **Next step:** Step 12 polish (optional), OR ship/demo.
-- **Last green test:** `uv run pytest tests/ -m "not live"` (215 passed, 1 deselected — Steps 0-11 combined); `uv run pyright harness/ tests/` (0 errors); `docker build` succeeds (377MB image).
+- **Last green test:** `uv run pytest tests/ -m "not live"` (259 passed, 1 deselected — Steps 0-11 + chat-first UI redesign + iter-cap fix); `uv run pyright harness/ tests/` (0 errors); `docker build` succeeds (377MB image).
 - **Active blockers:** none
 
 ## The 12-step checklist
@@ -72,6 +72,8 @@ Running list of design decisions made during the build. Each entry is one line p
 - **2026-06-13 — UUID7 (TEXT) for all `id` columns.** **Why:** time-ordered (first 48 bits are ms timestamp) so ordering by `id` gives chronological order, no `AUTOINCREMENT`, single `new_id()` helper everywhere, clean.
 - **2026-06-13 — FK columns on `events` (`material_id`, `checkpoint_id`, `alarm_id`) and a back-link on `alarms` (`triggered_by_event_id`, unenforced).** **Why:** joining `events` to any of the three referenced tables gives a queryable trace; the `alarms→events` back-pointer would create a cycle with the FK from `events.alarm_id`, so it's a logical reference only.
 - **2026-06-13 — 429 → auto-swap to fallback paid model, log `is_fallback=1`, append `model_swapped` event.** **Why:** keeps the demo running without manual intervention; makes the swap visible in the UI and queryable in `spend_log`; bounded blast radius (single retry, then `tool_failed` alarm).
+- **2026-06-13 — Chat-first UI redesign — conversation derived from events (`human_resumed`/`worker_output`), input area context-sensitive on `session.status` + pending materials, details accordion, per-type event summaries instead of JSON expanders.** **Why:** the prior page front-loaded a debug timeline; users want to see what the agent said and what they need to answer next, not a wall of JSON. Pure projection functions in `harness/api/view_helpers.py` keep Jinja logic-free and unit-testable.
+- **2026-06-13 — `iter_since_approval` resets on ANY `human_resumed` (bug fix) + `continuation_approval` pending material added when iter/spend caps trip.** **Why:** the old code only reset the counter when the user approved a brief or mockup — a freeform `ask_user` answer left the counter ticking and the user could hit the cap immediately after answering. Resetting on ANY resume matches the intent ("autonomous iterations between human inputs"). The new `continuation_approval` kind gives the UI something concrete to render when a cap trips, rather than a paused-but-empty input area.
 
 ## Maintenance protocol
 

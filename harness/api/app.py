@@ -41,6 +41,11 @@ from harness.api.dependencies import (
     get_app_context,
     open_connections,
 )
+from harness.api.view_helpers import (
+    build_conversation,
+    derive_active_models,
+    format_event_for_table,
+)
 from harness.domain.website_builder import (
     RESTAURANT_SEED_BRIEF,
     make_orchestrator_config,
@@ -223,7 +228,9 @@ def _serialize_run_result(result: RunResult) -> dict:
 
 _EVENTS_CAP = 500
 # Max events shown in the web UI events panel (the JSON API stays at 500).
-_UI_EVENTS_CAP = 50
+# Chat-first UI renders the events list inside the Details accordion; 200 is
+# the spec'd ceiling — newest last so the recent activity is what's visible.
+_UI_EVENTS_CAP = 200
 
 
 def _models_from_env() -> dict:
@@ -239,46 +246,6 @@ def _models_from_env() -> dict:
         "code_primary": os.environ.get("MODEL_CODE", ""),
         "code_fallback": os.environ.get("MODEL_CODE_FALLBACK", ""),
     }
-
-
-def _summarize_event_payload(event: dict) -> str:
-    """Render a short, human-readable summary of an event row for the UI.
-
-    Keeps the template logic-free. The full payload is shown inside a
-    <details> block; this is the visible <summary>.
-    """
-    etype = event.get("type", "?")
-    payload = event.get("payload") or {}
-    if not isinstance(payload, dict):
-        return etype
-    if etype == "worker_input":
-        return f"model={payload.get('model', '?')} msgs={payload.get('messages_count', 0)}"
-    if etype == "worker_output":
-        wt = payload.get("type")
-        if wt == "tool_call":
-            return f"tool_call -> {payload.get('tool', '?')}"
-        if wt == "final":
-            return f"final: {str(payload.get('summary', ''))[:60]}"
-        if wt == "escalate":
-            return f"escalate: {str(payload.get('reason', ''))[:60]}"
-        return wt or etype
-    if etype == "model_swapped":
-        return f"swap {payload.get('from', '?')} -> {payload.get('to', '?')}"
-    if etype == "tool_call":
-        return f"{payload.get('tool', '?')} (allowed={payload.get('allowed', '?')})"
-    if etype == "tool_result":
-        return f"{payload.get('tool', '?')} ok={payload.get('ok', '?')}"
-    if etype == "post_hook_run":
-        return f"validate_ok={payload.get('validate_ok', '?')} seo={payload.get('seo_regenerated', '?')}"
-    if etype == "checkpoint_result":
-        return f"{payload.get('name', '?')} -> {payload.get('status', '?')}"
-    if etype == "alarm_raised":
-        return f"{payload.get('type', '?')} ({payload.get('severity', '?')})"
-    if etype == "awaiting_human":
-        return f"reason={payload.get('reason', '?')}"
-    if etype == "human_resumed":
-        return f"material_id={payload.get('material_id', '?')[:8]}"
-    return etype
 
 
 def _create_app_routes(app: FastAPI) -> None:
@@ -424,8 +391,13 @@ def _create_app_routes(app: FastAPI) -> None:
 
             stage = session["current_stage"]
             content = pending.get("content")
-            is_approval = (
-                isinstance(content, dict) and content.get("kind") == "approval"
+            # `approval` is the worker-triggered request_approval flow; the
+            # `continuation_approval` kind is persisted by the orchestrator
+            # when an iter-cap or spend-cap trips and the user must approve
+            # continuing. Both are answered with a boolean `approved`.
+            is_approval = isinstance(content, dict) and content.get("kind") in (
+                "approval",
+                "continuation_approval",
             )
 
             if is_approval:
@@ -442,10 +414,22 @@ def _create_app_routes(app: FastAPI) -> None:
                 subject = (
                     content.get("subject") if isinstance(content, dict) else None
                 )
+                # Propagate the original kind so the orchestrator can tell
+                # request_approval responses apart from continuation_approval
+                # responses (the latter has denial semantics distinct from
+                # an approval/reject of a brief or mockup).
+                pending_kind = (
+                    content.get("kind") if isinstance(content, dict) else None
+                )
+                answer_kind = (
+                    pending_kind
+                    if pending_kind == "continuation_approval"
+                    else "approval"
+                )
                 answer_content: dict[str, Any] = {
                     "approved": bool(body.approved),
                     "subject": subject,
-                    "kind": "approval",
+                    "kind": answer_kind,
                     "notes": body.notes,
                 }
                 answer_mid = store.persist_material(
@@ -535,28 +519,56 @@ def _create_app_routes(app: FastAPI) -> None:
             unresolved = store.load_alarms(conns.session_conn, resolved=False)
             resolved = store.load_alarms(conns.session_conn, resolved=True)
             pending_materials = store.load_pending_materials(conns.session_conn)
+            # Pull every material (not just pending) so the conversation
+            # projector can resolve human_resumed payloads back to the
+            # question/approval they answered. Cheap: bounded by session size.
+            all_materials = conns.session_conn.execute(
+                "SELECT id, direction, stage, type, content, pending, created_at"
+                " FROM material ORDER BY id ASC"
+            ).fetchall()
+            materials_list = [store.load_material(conns.session_conn, m["id"]) for m in all_materials]
 
-        # Cap events at 50 most recent for display; flag truncation.
+        # Cap events at 200 most recent for display; flag truncation.
         events_total = len(events_all)
         events_truncated = events_total > _UI_EVENTS_CAP
         events = events_all[-_UI_EVENTS_CAP:] if events_truncated else events_all
-        # Pre-compute a short summary per event so templates stay logic-free.
-        event_summaries = [_summarize_event_payload(e) for e in events]
+
+        # New chat-first projections.
+        materials_by_id: dict[str, dict] = {
+            m["id"]: m for m in materials_list if m is not None
+        }
+        conversation = build_conversation(
+            [_serialize_event(e) for e in events_all],
+            materials_by_id,
+        )
+        formatted_events = [
+            format_event_for_table(_serialize_event(e)) for e in events
+        ]
+        active_models = derive_active_models()
 
         alarms_ordered = list(unresolved) + list(resolved)
 
         models = _models_from_env()
 
-        # Site preview: enable iframe if data/sites/{id}/index.html exists.
-        site_index = ctx.sites_dir / session_id / "index.html"
-        has_site_preview = site_index.is_file()
+        # Site files: render the iframe if ANY *.html lives under the per-
+        # session sites dir (not just index.html — partial builds count too).
+        sites_root = ctx.sites_dir / session_id
+        has_site_files = sites_root.is_dir() and any(sites_root.rglob("*.html"))
+        has_site_preview = (sites_root / "index.html").is_file()
+
+        swapped_in_session = any(
+            e.get("type") == "model_swapped" for e in events_all
+        )
 
         context = {
             "session": _serialize_session(session),
             "events": [_serialize_event(e) for e in events],
             "events_total": events_total,
             "events_truncated": events_truncated,
-            "event_summaries": event_summaries,
+            "formatted_events": formatted_events,
+            "conversation": conversation,
+            "active_models": active_models,
+            "swapped_in_session": swapped_in_session,
             "checkpoints": [_serialize_checkpoint(c) for c in checkpoints],
             "alarms": [_serialize_alarm(a) for a in alarms_ordered],
             "pending_materials": [
@@ -565,6 +577,7 @@ def _create_app_routes(app: FastAPI) -> None:
             "spend_summary": spend_summary,
             "models": models,
             "has_site_preview": has_site_preview,
+            "has_site_files": has_site_files,
         }
         template_name = "_session_main.html" if partial else "session.html"
         return _templates.TemplateResponse(request, template_name, context)

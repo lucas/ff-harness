@@ -196,7 +196,13 @@ Drive the orchestrator until it hits a pause, terminal state, or cap. Synchronou
 
 ## `POST /sessions/{id}/answer`
 
-Submit a user's response to a pending question or approval request, then resume the loop. The body shape depends on the pending material's `type`: a `pending_question` waiting on `ask_user` expects `answer_text`; one waiting on `request_approval` expects `approved` (with optional `notes`). The handler reads the pending material to decide which `MaterialType` to persist (`user_answer` vs `user_approval`).
+Submit a user's response to a pending question or approval request, then resume the loop. The body shape depends on the `content.kind` of the pending `pending_question` material:
+
+- `kind == "approval"` — originated from a `request_approval` tool call. Expects `approved` (bool) and optional `notes`. Persisted as a `user_approval` material with `content.kind = "approval"`.
+- `kind == "continuation_approval"` — written by the orchestrator when the iter cap or spend cap trips. Expects `approved` (bool) and optional `notes`. Persisted as a `user_approval` material with `content.kind = "continuation_approval"` so the orchestrator can distinguish a "continue past the cap" decision from a brief/mockup approval. A denial (`approved=false`) keeps the session paused; an approval flips it back to `active` and the loop resumes.
+- missing `kind` (or any other value) — originated from `ask_user`. Expects `answer_text`. Persisted as a `user_answer` material.
+
+The handler reads the pending material's `content.kind` to decide which `MaterialType` to persist (`user_answer` vs `user_approval`) and to set the answer's `kind` field on the persisted row.
 
 - **Method:** `POST`
 - **Path:** `/sessions/{id}/answer`
@@ -229,7 +235,7 @@ Submit a user's response to a pending question or approval request, then resume 
   - `404` — session or material not found; `error="not_found"`.
   - `409` — material is not pending (already answered or never was); `error="conflict"`.
   - `500` — unhandled exception during resume.
-- **Called by:** `awaiting.html` form submit.
+- **Called by:** the chat input area in `_session_main.html` (the pending-material form lives in the same partial as the chat log; `awaiting.html` was removed when the UI moved to the chat-first layout). Three button affordances depending on `content.kind`: Approve/Deny (for `approval`), Approve/Stop (for `continuation_approval`), or Send (for freeform `ask_user`).
 
 ---
 

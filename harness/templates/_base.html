@@ -164,6 +164,115 @@
       font-style: italic;
       padding: 8px 0;
     }
+
+    /* ---- Chat-first layout ---- */
+    .chat-panel {
+      display: flex;
+      flex-direction: column;
+      min-height: 60vh;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      margin-bottom: 16px;
+    }
+    .chat-log {
+      flex: 1 1 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 16px;
+      overflow-y: auto;
+      max-height: 70vh;
+    }
+    .chat-msg {
+      display: flex;
+      flex-direction: column;
+      max-width: 70%;
+    }
+    .chat-msg.user {
+      align-self: flex-end;
+      align-items: flex-end;
+    }
+    .chat-msg.agent {
+      align-self: flex-start;
+      align-items: flex-start;
+    }
+    .chat-bubble {
+      padding: 8px 12px;
+      border-radius: 12px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      line-height: 1.4;
+    }
+    .chat-msg.user .chat-bubble {
+      background: var(--accent);
+      color: white;
+      border-bottom-right-radius: 4px;
+    }
+    .chat-msg.agent .chat-bubble {
+      background: #f1f3f5;
+      color: var(--fg);
+      border-bottom-left-radius: 4px;
+    }
+    .chat-time {
+      font-size: 10px;
+      color: var(--fg-faint);
+      margin: 2px 4px;
+      font-variant-numeric: tabular-nums;
+    }
+    .chat-msg .tag {
+      display: inline-block;
+      margin-top: 4px;
+      padding: 1px 6px;
+      border-radius: 6px;
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      background: var(--neutral);
+      color: white;
+    }
+    .chat-msg .tag.final { background: var(--pass); }
+    .chat-msg .tag.escalate { background: var(--warn); }
+    .chat-options {
+      margin-top: 6px;
+      font-size: 12px;
+      color: var(--fg-muted);
+    }
+    .chat-input {
+      border-top: 1px solid var(--border);
+      padding: 12px 16px;
+      background: var(--bg-card);
+      border-bottom-left-radius: 6px;
+      border-bottom-right-radius: 6px;
+    }
+    .chat-input .pending-q {
+      margin-bottom: 8px;
+      color: var(--fg);
+    }
+    .chat-input .pending-q.continuation {
+      background: #fef3c7;
+      border-left: 3px solid var(--warn);
+      padding: 8px 12px;
+      border-radius: 4px;
+    }
+    .chat-input textarea {
+      margin-bottom: 8px;
+    }
+    .chat-input textarea:disabled {
+      background: var(--bg);
+      color: var(--fg-faint);
+      cursor: not-allowed;
+    }
+    .more-pending {
+      font-size: 11px;
+      color: var(--fg-faint);
+      margin-top: 6px;
+    }
+    /* Events table — keep the model-swap highlight visible */
+    .event-row.event-model_swapped { background: var(--highlight-bg); }
+    .event-row.highlight { background: var(--highlight-bg); }
+    .events-truncated-note { font-size: 11px; color: var(--fg-faint); padding: 4px 0; }
   </style>
   {% block head %}{% endblock %}
 </head>
