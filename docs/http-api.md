@@ -37,6 +37,7 @@ Create a new session and persist its row in the core DB.
   - `400` — body is not valid JSON.
   - `500` — DB initialization failed.
 - **Called by:** `index.html` "New session" form (POSTs, then redirects to `/sessions/{id}`).
+- **No materials pre-populated.** The session is created empty. The bootstrap flow (chat worker collects info via `ask_user`; user approves via `request_approval(subject='business_brief', details=…)`; orchestrator persists `details` as a `business_brief` material on approval) drives the brief. `RESTAURANT_SEED_BRIEF` in `harness/domain/website_builder.py` is retained for opt-in demos / tests but is NOT auto-seeded here.
 
 ---
 

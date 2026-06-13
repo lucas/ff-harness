@@ -761,6 +761,33 @@ def _latest_brief_content(session_conn: sqlite3.Connection) -> dict | None:
     return content if isinstance(content, dict) else None
 
 
+def _pending_for_resume(
+    session_conn: sqlite3.Connection, resume_event_id: str
+) -> dict | None:
+    """Return the pending_question material the given human_resumed answered.
+
+    Walks back through events from ``resume_event_id`` and grabs the
+    ``material_id`` of the most recent prior ``awaiting_human`` event. That
+    id points to the pending material (typically a ``pending_question``
+    carrying ``content.kind = 'approval'`` and ``content.details``) the
+    user just resolved. Returns None if no such event exists or the row is
+    gone.
+    """
+    events = store.load_events(session_conn)
+    seen_resume = False
+    for e in reversed(events):
+        if not seen_resume:
+            if e["id"] == resume_event_id:
+                seen_resume = True
+            continue
+        if e["type"] == EventType.AWAITING_HUMAN.value:
+            pending_id = e.get("material_id")
+            if isinstance(pending_id, str):
+                return store.load_material(session_conn, pending_id)
+            return None
+    return None
+
+
 def _latest_brief_material(session_conn: sqlite3.Connection) -> dict | None:
     row = session_conn.execute(
         "SELECT id, direction, stage, type, content, pending, created_at"
@@ -953,6 +980,36 @@ def _consume_resume_if_present(
     # human_resumed event; the branches below only handle approval-specific
     # checkpoint evaluation and stage advancement.
     if subject == "business_brief":
+        # Persist the approved brief as a business_brief material so
+        # downstream tools (e.g. render_mockup -> _latest_business_brief)
+        # see the user's actual collected brief, not the seed default or
+        # nothing. Source: the original pending_question material that
+        # this approval responded to — its content carries the brief dict
+        # under `details` (see services/tools/user.py request_approval).
+        # Only persist on approve=True and only when details is a
+        # non-empty dict; missing/empty details is a defensive no-op.
+        if approved:
+            pending_material = _pending_for_resume(
+                session_conn, latest["id"]
+            )
+            pending_content = (
+                pending_material.get("content") if pending_material else None
+            )
+            details = (
+                pending_content.get("details")
+                if isinstance(pending_content, dict)
+                else None
+            )
+            if isinstance(details, dict) and details:
+                store.persist_material(
+                    session_conn,
+                    direction=Direction.OUT.value,
+                    stage=stage,
+                    type=MaterialType.BUSINESS_BRIEF.value,
+                    content=details,
+                    pending=False,
+                )
+
         brief_material = _latest_brief_material(session_conn)
         result = checkpoints.evaluate_business_brief_confirmed(
             brief_material=brief_material,

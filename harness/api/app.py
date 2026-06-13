@@ -47,7 +47,6 @@ from harness.api.view_helpers import (
     format_event_for_table,
 )
 from harness.domain.website_builder import (
-    RESTAURANT_SEED_BRIEF,
     make_orchestrator_config,
 )
 from harness.models.enums import (
@@ -267,23 +266,16 @@ def _create_app_routes(app: FastAPI) -> None:
         body: CreateSessionRequest,
         ctx: AppContext = Depends(get_app_context),
     ) -> JSONResponse:
-        # Empty-body request validated by pydantic; create row + seed brief.
+        # Empty-body request validated by pydantic; create row. The session
+        # is created with NO business_brief material — the bootstrap flow
+        # (chat worker + ask_user rounds) produces the brief, and approving
+        # request_approval(subject='business_brief') persists it. Seeding a
+        # default brief here previously caused render_mockup to render the
+        # placeholder ("Maria's Pizzeria") for every real user.
         with open_connections(ctx) as conns:
             assert conns.core_conn is not None
             session_id = store.create_session(
                 conns.core_conn, current_stage=Stage.BOOTSTRAP.value
-            )
-
-        # Open a per-session connection to seed the restaurant brief so the
-        # worker has a Business Brief in context from turn 1.
-        with open_connections(ctx, session_id=session_id) as conns:
-            assert conns.session_conn is not None
-            store.persist_material(
-                conns.session_conn,
-                direction=Direction.OUT.value,
-                stage=Stage.BOOTSTRAP.value,
-                type=MaterialType.BUSINESS_BRIEF.value,
-                content=RESTAURANT_SEED_BRIEF,
             )
 
         # Re-load the session row for response shape (need created_at, status).

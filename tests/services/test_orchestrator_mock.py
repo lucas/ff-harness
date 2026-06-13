@@ -1877,3 +1877,148 @@ def test_rewind_session_then_answer_continues_normally(orchestrator_setup):
         )
     r4 = run_until_pause(session_id, config)
     assert r4.status == SessionStatus.COMPLETED.value
+
+
+# ---------------------------------------------------------------------------
+# Bug-2 fixes: approving request_approval(subject='business_brief') persists
+# the collected details as a new business_brief material.
+# ---------------------------------------------------------------------------
+
+
+_BRIEF_DETAILS_JIMS_HVAC = {
+    "name": "Jim's HVAC",
+    "industry": "Home service (HVAC)",
+    "palette": {"primary": "#0055aa", "secondary": "#ffffff"},
+}
+
+
+def _drive_brief_approval(
+    setup,
+    *,
+    details: dict,
+    approved: bool,
+) -> None:
+    """Helper: run one turn that calls request_approval(business_brief), then
+    simulate the human's approve/deny via _simulate_human_approval, then run
+    the orchestrator again so the resume-fold step processes the response.
+    """
+    scripted: list[ToolCall | Final | Escalate] = [
+        ToolCall(
+            tool="request_approval",
+            args={"subject": "business_brief", "details": details},
+        ),
+        # A second response so the loop has something to run after fold, but
+        # the orchestrator will likely pause first on the awaiting_human or
+        # complete depending on what's next; we use Final to terminate cleanly
+        # in case the fold advances stage and the loop wants another turn.
+        Final(summary="done"),
+    ]
+    worker = MockWorker(scripted_responses=scripted)
+    workers_by_stage = {
+        Stage.BOOTSTRAP.value: worker,
+        Stage.MOCKUP.value: worker,
+        Stage.BUILD.value: worker,
+    }
+    config = _build_config(
+        core_db_path=setup["core_db_path"],
+        sessions_dir=setup["sessions_dir"],
+        sandbox_root=setup["sandbox_root"],
+        workers_by_stage=workers_by_stage,
+    )
+
+    # Turn 1: worker calls request_approval -> pause.
+    r1 = run_until_pause(setup["session_id"], config)
+    assert r1.status == SessionStatus.AWAITING_HUMAN.value
+    assert r1.paused_reason == PAUSE_AWAITING_HUMAN
+
+    # User approves/denies the brief.
+    with setup["session_conn_factory"]() as session_conn:
+        pending = _last_awaiting_pending_material_id(session_conn)
+        _simulate_human_approval(
+            setup["core_conn"],
+            session_conn,
+            setup["session_id"],
+            pending_material_id=pending,
+            approved=approved,
+            subject="business_brief",
+            stage=Stage.BOOTSTRAP.value,
+        )
+
+    # Re-enter the loop so the resume-fold step runs.
+    run_until_pause(setup["session_id"], config)
+
+
+def test_brief_approval_persists_business_brief_material(orchestrator_setup):
+    """Approving request_approval(subject='business_brief') persists details
+    as a new business_brief material so render_mockup sees the user's brief."""
+    setup = orchestrator_setup
+
+    # Pre-condition: no business_brief material exists yet (session was
+    # created empty per Fix 1).
+    with setup["session_conn_factory"]() as session_conn:
+        assert store.latest_material_by_type(
+            session_conn, MaterialType.BUSINESS_BRIEF.value
+        ) is None
+
+    _drive_brief_approval(
+        setup, details=_BRIEF_DETAILS_JIMS_HVAC, approved=True
+    )
+
+    with setup["session_conn_factory"]() as session_conn:
+        latest = store.latest_material_by_type(
+            session_conn, MaterialType.BUSINESS_BRIEF.value
+        )
+        assert latest is not None
+        content = latest["content"]
+        assert content["name"] == "Jim's HVAC"
+        assert content["industry"] == "Home service (HVAC)"
+        assert content["palette"] == {
+            "primary": "#0055aa",
+            "secondary": "#ffffff",
+        }
+        assert latest["pending"] is False
+        assert latest["direction"] == Direction.OUT.value
+
+        # business_brief_confirmed checkpoint also passes (existing behavior).
+        ckpts = store.load_checkpoints(
+            session_conn, name=CheckpointName.BUSINESS_BRIEF_CONFIRMED.value
+        )
+        assert ckpts, "business_brief_confirmed checkpoint not recorded"
+        assert ckpts[-1]["status"] == CheckpointStatus.PASS.value
+
+
+def test_brief_approval_with_empty_details_does_not_crash(orchestrator_setup):
+    """Approving with details={} skips the persist (no crash) and still
+    evaluates the checkpoint."""
+    setup = orchestrator_setup
+
+    _drive_brief_approval(setup, details={}, approved=True)
+
+    with setup["session_conn_factory"]() as session_conn:
+        # No business_brief material persisted (empty details is a no-op).
+        latest = store.latest_material_by_type(
+            session_conn, MaterialType.BUSINESS_BRIEF.value
+        )
+        assert latest is None
+
+        # The checkpoint still evaluates. It may fail (no brief on file), but
+        # the row must exist — that's the existing behavior we preserve.
+        ckpts = store.load_checkpoints(
+            session_conn, name=CheckpointName.BUSINESS_BRIEF_CONFIRMED.value
+        )
+        assert ckpts, "business_brief_confirmed checkpoint not recorded"
+
+
+def test_brief_denial_does_not_persist_brief(orchestrator_setup):
+    """Denying the brief approval must NOT persist a business_brief material."""
+    setup = orchestrator_setup
+
+    _drive_brief_approval(
+        setup, details=_BRIEF_DETAILS_JIMS_HVAC, approved=False
+    )
+
+    with setup["session_conn_factory"]() as session_conn:
+        latest = store.latest_material_by_type(
+            session_conn, MaterialType.BUSINESS_BRIEF.value
+        )
+        assert latest is None

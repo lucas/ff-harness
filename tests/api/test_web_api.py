@@ -153,11 +153,11 @@ def test_get_detail_on_fresh_session(make_client):
     assert body["session"]["status"] == "active"
     assert body["session"]["current_stage"] == "bootstrap"
 
-    # Fresh session — no events yet (brief was seeded without an event).
+    # Fresh session — no events, no checkpoints, no alarms, no pending
+    # materials. The session starts empty; the bootstrap flow populates it.
     assert body["events"] == []
     assert body["checkpoints"] == []
     assert body["alarms"] == []
-    # Brief was seeded with pending=False — should not appear in pending list.
     assert body["pending_materials"] == []
 
     # Spend summary shape: empty.
@@ -368,35 +368,39 @@ def test_spend_summary_empty_after_mock_run(make_client):
 
 
 # ---------------------------------------------------------------------------
-# 7. Auto-seed restaurant brief
+# 7. No auto-seed on session creation
 # ---------------------------------------------------------------------------
 
 
-def test_create_session_auto_seeds_restaurant_brief(make_client, tmp_path: Path):
-    """POST /sessions must seed a business_brief material with the restaurant data."""
+def test_create_session_does_not_auto_seed_brief(make_client, tmp_path: Path):
+    """POST /sessions must NOT pre-populate a business_brief material.
+
+    The bootstrap flow (chat worker collects info via ask_user; user approves
+    via request_approval(subject='business_brief')) is the only path that
+    persists the brief. Auto-seeding here previously caused render_mockup to
+    theme every real user's site with the placeholder "Maria's Pizzeria".
+    """
     client = make_client([])
     sid = client.post("/sessions", json={}).json()["session_id"]
 
     # Open the per-session DB directly (auth-free: it's our test sandbox).
-    # The TestClient's ctx writes to tmp_path/data/sessions/<sid>.db.
+    # The TestClient's ctx writes to tmp_path/data/sessions/<sid>.db. If the
+    # file doesn't exist at all that's a stronger pass — it means POST
+    # /sessions did not touch the per-session DB. If it exists, the
+    # business_brief table slice must be empty.
     db_path = tmp_path / "data" / "sessions" / f"{sid}.db"
-    assert db_path.is_file()
-
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        "SELECT type, content, pending FROM material"
-    ).fetchall()
-    conn.close()
-
-    briefs = [r for r in rows if r["type"] == "business_brief"]
-    assert len(briefs) == 1, f"expected 1 brief, got {len(briefs)}"
-    # Seeded with pending=False (we don't want it appearing in /pending).
-    assert briefs[0]["pending"] == 0
-    import json as _json
-    content = _json.loads(briefs[0]["content"])
-    assert content["name"] == "Maria's Pizzeria"
-    assert content["industry"] == "restaurant"
+    if db_path.is_file():
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT type, content, pending FROM material"
+        ).fetchall()
+        conn.close()
+        briefs = [r for r in rows if r["type"] == "business_brief"]
+        assert briefs == [], (
+            f"expected no business_brief materials immediately after"
+            f" POST /sessions, got {len(briefs)}"
+        )
 
 
 # ---------------------------------------------------------------------------

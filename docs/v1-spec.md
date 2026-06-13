@@ -63,7 +63,7 @@ harness/
     llm_worker.py               # LLMWorker(primary, fallback) — auto-swap on 429
   domain/                       # Layer 3 — domain bundle (declarative config)
     __init__.py
-    website_builder.py          # system prompt, allowed tools, checkpoint set, stage→worker map, seed brief
+    website_builder.py          # system prompt, allowed tools, checkpoint set, stage→worker map, RESTAURANT_SEED_BRIEF (defined for opt-in demos / tests; NOT auto-seeded on session creation)
   api/                          # Layer 3 — HTTP surface (thin, delegates to services)
     __init__.py
     app.py                      # FastAPI app + routes
@@ -253,7 +253,7 @@ WorkerResponse = Annotated[ToolCall | Final | Escalate, Field(discriminator='typ
 
 | `type` | `direction` | When created | `content` shape |
 |---|---|---|---|
-| `business_brief` | out | bootstrap complete | the brief dict (industry, name, contact, pages, palette, ...) |
+| `business_brief` | out | user approves `request_approval(subject='business_brief', details={...})` — orchestrator persists `details` as a new `business_brief` material so downstream tools (`render_mockup`) see the user's actual brief. POST `/sessions` does NOT auto-seed this material. | the brief dict (industry, name, contact, pages, palette, ...) |
 | `pending_question` | out | `ask_user` or `request_approval` invoked | `{question, options?}` |
 | `user_answer` | in | `/answer` POST | `{answer_text}` |
 | `user_approval` | in | `/answer` POST for approval | `{approved: bool, notes?}` |
@@ -428,15 +428,15 @@ Strict module boundaries. Each line is the only contract between two modules.
 - `validators.py` — pure HTML (`html5lib`) / CSS (`tinycss2`) / SEO (stdlib `xml.etree`) functions; reused by post-hooks and `site_valid` checkpoint. JS validation deferred (no good pure-Python option).
 - `tools/*.py` — one file per tool; each is `def name(args, ctx) -> ToolResult`.
 - `post_hooks.py` — the validate→SEO→git chain that runs after every `write_file`.
-- `domain/website_builder.py` — system prompt, tool allow-list, checkpoint set, stage→worker map, restaurant seed brief.
+- `domain/website_builder.py` — system prompt, tool allow-list, checkpoint set, stage→worker map. Defines `RESTAURANT_SEED_BRIEF` for opt-in demos / tests only — POST `/sessions` does not auto-seed it.
 - `app.py` — FastAPI routes; thin; delegates to orchestrator + store.
 
 ## 16. Demo flow (Maria's restaurant)
 
 End-to-end path the demo video walks through:
 
-1. **Bootstrap.** Session created; orchestrator routes to chat worker. Bootstrap skill is injected via `WorkerContext.system_prompt`. Worker batches `ask_user` calls (~3 rounds: name + industry, contact + location, aesthetic + palette) — each round pauses the session, the user answers via the chat input area in `_session_main.html`, loop resumes. Brief is assembled and persisted as a `business_brief` material.
-2. **Brief approval.** Worker calls `request_approval` with the full brief summary. User approves → `user_approval` material → `business_brief_confirmed` checkpoint passes → stage transitions to `mockup`.
+1. **Bootstrap.** Session created with no materials (POST `/sessions` does not auto-seed a brief). The orchestrator routes to the chat worker; the bootstrap skill is injected via `WorkerContext.system_prompt`. The worker batches `ask_user` calls (~3 rounds: name + industry, contact + location, aesthetic + palette) — each round pauses the session, the user answers via the chat input area in `_session_main.html`, loop resumes. The worker assembles the brief in-context.
+2. **Brief approval.** Worker calls `request_approval(subject='business_brief', details=<the brief>)`. User approves → `user_approval` material → the orchestrator's resume-fold step persists `details` as a new `business_brief` material (so `render_mockup` and any other downstream tool sees the user's actual brief, not a placeholder) → `business_brief_confirmed` checkpoint passes → stage transitions to `mockup`.
 3. **Mockup.** Chat worker emits a `layout_spec` material, calls `render_mockup` → ASCII mockup with regions → `mockup_renders` checkpoint passes → worker calls `request_approval` → user approves → `mockup_approved` checkpoint passes → stage transitions to `build`.
 4. **Site generation (iteration 1 — engineered failure).** Code worker calls `write_file` for `index.html`. **System prompt nudges the worker to omit `<title>`.** Post-hook chain runs: validate flags `has_title=false`; `site_valid` checkpoint **fails**; `tool_failed` alarm raised on validator failure; worker sees alarm in next `WorkerContext.state.last_alarm`.
 5. **Site generation (iteration 2 — fix).** Code worker reads alarm context, calls `write_file` again with `<title>` added. Post-hook chain: validate passes; SEO files regenerated; git commit succeeds; `site_valid` and `seo_artifacts_present` checkpoints **pass**.

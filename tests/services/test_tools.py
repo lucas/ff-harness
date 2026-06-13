@@ -588,3 +588,37 @@ def test_render_mockup_ascii_unchanged_when_brief_present(tmp_session, sandbox_d
     with_brief = _ok(dispatch("render_mockup", {"layout_spec": _spec()}, ctx))["ascii"]
 
     assert no_brief == with_brief
+
+
+def test_render_mockup_uses_persisted_brief_after_approval(
+    tmp_session, sandbox_dir
+):
+    """End-to-end sanity for Bug 2's fix: once a business_brief material has
+    been persisted (as the orchestrator does on approval), render_mockup
+    themes its HTML against THAT brief — not a placeholder, not nothing.
+    Persisting the brief directly stands in for the orchestrator's resume-
+    fold persistence, which is covered separately in test_orchestrator_mock.
+    """
+    _core, session_conn, _sid = tmp_session
+    _persist_brief(
+        session_conn,
+        {
+            "name": "Jim's HVAC",
+            "industry": "Home service (HVAC)",
+            "palette": {"primary": "#0055aa", "secondary": "#ffffff"},
+        },
+    )
+    ctx = make_ctx(tmp_session, sandbox_dir, stage="mockup")
+
+    result = dispatch("render_mockup", {"layout_spec": _spec()}, ctx)
+    out = _ok(result)
+
+    assert out["themed"] is True
+    html_doc = out["html"]
+    # Apostrophe in "Jim's HVAC" is HTML-escaped to &#x27; on insertion.
+    assert "Jim&#x27;s HVAC" in html_doc
+    # Palette hex values appear in the inline style block.
+    assert "#0055aa" in html_doc
+    assert "#ffffff" in html_doc
+    # The seed placeholder is not present in the rendered HTML.
+    assert "Maria&#x27;s Pizzeria" not in html_doc
