@@ -5,9 +5,9 @@ This file is the live state of the v1 build. It is self-sufficient: after `/clea
 ## Status snapshot
 
 - **Last updated:** 2026-06-13
-- **Current step:** Step 10 — Jinja2 templates (Layer 4) — next up
-- **Next step:** Step 11 — Demo polish + Docker + HARNESS.md
-- **Last green test:** `uv run pytest tests/ -m "not live"` (208 passed, 1 deselected — Steps 0-9 combined); `uv run pyright harness/ tests/` (0 errors).
+- **Current step:** Step 11 — Demo polish + Docker + HARNESS.md (next up)
+- **Next step:** Step 12 — Polish (optional)
+- **Last green test:** `uv run pytest tests/ -m "not live"` (215 passed, 1 deselected — Steps 0-10 combined); `uv run pyright harness/ tests/` (0 errors).
 - **Active blockers:** none
 
 ## The 12-step checklist
@@ -44,7 +44,7 @@ Each row is one step from the Build Order in `/Users/elroy/.claude/plans/ignore-
 - [x] **Step 9 — Domain bundle + FastAPI routes.** Status: done (2026-06-13).
   - Gate: `uv run pytest tests/api/test_web_api.py`
   - Done when: every route in `docs/http-api.md` is implemented, returns the documented JSON shape, and the create→resume→detail→answer→resume→final flow passes end-to-end with MockWorker injected.
-- [ ] **Step 10 — Jinja2 templates.** Status: pending.
+- [x] **Step 10 — Jinja2 templates.** Status: done (2026-06-13).
   - Gate: `uv run pytest tests/api/test_web_ui.py`
   - Done when: each template renders without exception; rendered HTML contains the expected anchors; 2-second polling visibly updates the event timeline in the browser walk-through.
 - [ ] **Step 11 — Demo polish + Docker + HARNESS.md.** Status: pending.

@@ -1,8 +1,10 @@
-"""FastAPI app — the 5 routes documented in docs/http-api.md.
+"""FastAPI app — the 5 JSON routes documented in docs/http-api.md plus the
+server-rendered web UI routes (Step 10).
 
 Layer rule: thin handlers. Validation + serialization here; everything else
 is delegated to `harness.services.*` (via `harness.domain.website_builder` for
-orchestration plumbing). MUST NOT import from `harness.templates`.
+orchestration plumbing). HTML route handlers read from `harness.services.store`
+and pass data into Jinja2 templates rooted at `harness/templates/`.
 
 All routes are sync (`def`, not `async def`). POST /sessions/{id}/resume and
 POST /sessions/{id}/answer both call `orchestrator.run_until_pause` inline
@@ -12,13 +14,17 @@ and block for its duration — no background tasks.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ConfigDict, Field
 
 from harness.api.dependencies import (
@@ -40,6 +46,12 @@ from harness.models.enums import (
 )
 from harness.services import store
 from harness.services.orchestrator import RunResult, run_until_pause
+
+
+# Templates env shared by all HTML routes.  Resolved relative to this module
+# so the app works regardless of the process cwd.
+_TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
+_templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +214,63 @@ def _serialize_run_result(result: RunResult) -> dict:
 
 
 _EVENTS_CAP = 500
+# Max events shown in the web UI events panel (the JSON API stays at 500).
+_UI_EVENTS_CAP = 50
+
+
+def _models_from_env() -> dict:
+    """Read the four MODEL_* env vars for display on the session detail page.
+
+    Returns blank strings (not the domain bundle's defaults) for unset vars so
+    the UI shows what the operator actually configured. Reading env per
+    request is cheap and means a `.env` edit is picked up on next page load.
+    """
+    return {
+        "chat_primary": os.environ.get("MODEL_CHAT", ""),
+        "chat_fallback": os.environ.get("MODEL_CHAT_FALLBACK", ""),
+        "code_primary": os.environ.get("MODEL_CODE", ""),
+        "code_fallback": os.environ.get("MODEL_CODE_FALLBACK", ""),
+    }
+
+
+def _summarize_event_payload(event: dict) -> str:
+    """Render a short, human-readable summary of an event row for the UI.
+
+    Keeps the template logic-free. The full payload is shown inside a
+    <details> block; this is the visible <summary>.
+    """
+    etype = event.get("type", "?")
+    payload = event.get("payload") or {}
+    if not isinstance(payload, dict):
+        return etype
+    if etype == "worker_input":
+        return f"model={payload.get('model', '?')} msgs={payload.get('messages_count', 0)}"
+    if etype == "worker_output":
+        wt = payload.get("type")
+        if wt == "tool_call":
+            return f"tool_call -> {payload.get('tool', '?')}"
+        if wt == "final":
+            return f"final: {str(payload.get('summary', ''))[:60]}"
+        if wt == "escalate":
+            return f"escalate: {str(payload.get('reason', ''))[:60]}"
+        return wt or etype
+    if etype == "model_swapped":
+        return f"swap {payload.get('from', '?')} -> {payload.get('to', '?')}"
+    if etype == "tool_call":
+        return f"{payload.get('tool', '?')} (allowed={payload.get('allowed', '?')})"
+    if etype == "tool_result":
+        return f"{payload.get('tool', '?')} ok={payload.get('ok', '?')}"
+    if etype == "post_hook_run":
+        return f"validate_ok={payload.get('validate_ok', '?')} seo={payload.get('seo_regenerated', '?')}"
+    if etype == "checkpoint_result":
+        return f"{payload.get('name', '?')} -> {payload.get('status', '?')}"
+    if etype == "alarm_raised":
+        return f"{payload.get('type', '?')} ({payload.get('severity', '?')})"
+    if etype == "awaiting_human":
+        return f"reason={payload.get('reason', '?')}"
+    if etype == "human_resumed":
+        return f"material_id={payload.get('material_id', '?')[:8]}"
+    return etype
 
 
 def _create_app_routes(app: FastAPI) -> None:
@@ -418,6 +487,80 @@ def _create_app_routes(app: FastAPI) -> None:
         result = _run_loop_for(ctx, session_id)
         return _serialize_run_result(result)
 
+    # -------------------- HTML routes (web UI) --------------------
+
+    @app.get("/", response_class=HTMLResponse)
+    def home(
+        request: Request,
+        ctx: AppContext = Depends(get_app_context),
+    ):
+        with open_connections(ctx) as conns:
+            assert conns.core_conn is not None
+            rows = store.list_sessions(conns.core_conn)
+        sessions = [_serialize_session(r) for r in rows]
+        return _templates.TemplateResponse(
+            request,
+            "index.html",
+            {"sessions": sessions},
+        )
+
+    @app.get("/sessions/{session_id}/view", response_class=HTMLResponse)
+    def view_session(
+        session_id: str,
+        request: Request,
+        partial: bool = False,
+        ctx: AppContext = Depends(get_app_context),
+    ):
+        with open_connections(ctx) as conns:
+            assert conns.core_conn is not None
+            session = store.load_session(conns.core_conn, session_id)
+            if session is None:
+                raise _not_found("not_found", {"session_id": session_id})
+            spend_summary = store.spend_summary_for_session(
+                conns.core_conn, session_id
+            )
+
+        with open_connections(ctx, session_id=session_id) as conns:
+            assert conns.session_conn is not None
+            events_all = store.load_events(conns.session_conn)
+            checkpoints = store.load_checkpoints(conns.session_conn)
+            unresolved = store.load_alarms(conns.session_conn, resolved=False)
+            resolved = store.load_alarms(conns.session_conn, resolved=True)
+            pending_materials = store.load_pending_materials(conns.session_conn)
+
+        # Cap events at 50 most recent for display; flag truncation.
+        events_total = len(events_all)
+        events_truncated = events_total > _UI_EVENTS_CAP
+        events = events_all[-_UI_EVENTS_CAP:] if events_truncated else events_all
+        # Pre-compute a short summary per event so templates stay logic-free.
+        event_summaries = [_summarize_event_payload(e) for e in events]
+
+        alarms_ordered = list(unresolved) + list(resolved)
+
+        models = _models_from_env()
+
+        # Site preview: enable iframe if data/sites/{id}/index.html exists.
+        site_index = ctx.sites_dir / session_id / "index.html"
+        has_site_preview = site_index.is_file()
+
+        context = {
+            "session": _serialize_session(session),
+            "events": [_serialize_event(e) for e in events],
+            "events_total": events_total,
+            "events_truncated": events_truncated,
+            "event_summaries": event_summaries,
+            "checkpoints": [_serialize_checkpoint(c) for c in checkpoints],
+            "alarms": [_serialize_alarm(a) for a in alarms_ordered],
+            "pending_materials": [
+                _serialize_material(m) for m in pending_materials
+            ],
+            "spend_summary": spend_summary,
+            "models": models,
+            "has_site_preview": has_site_preview,
+        }
+        template_name = "_session_main.html" if partial else "session.html"
+        return _templates.TemplateResponse(request, template_name, context)
+
     # -------------------- exception handlers --------------------
 
     @app.exception_handler(_ApiError)
@@ -501,10 +644,18 @@ def create_app(app_context: AppContext | None = None) -> FastAPI:
     retrieve it from any handler via FastAPI's Depends().
     """
     fastapi_app = FastAPI(title="harness", version="0.1.0")
-    fastapi_app.state.app_context = (
+    ctx = (
         app_context if app_context is not None else build_default_app_context()
     )
+    fastapi_app.state.app_context = ctx
     _create_app_routes(fastapi_app)
+    # Static mount for generated sites — served at /sites/{session_id}/...
+    # The directory is guaranteed to exist by build_default_app_context (or
+    # by the test fixture in tests/api/test_web_ui.py).
+    ctx.sites_dir.mkdir(parents=True, exist_ok=True)
+    fastapi_app.mount(
+        "/sites", StaticFiles(directory=str(ctx.sites_dir)), name="sites"
+    )
     return fastapi_app
 
 

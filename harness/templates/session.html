@@ -1,0 +1,116 @@
+{% extends "_base.html" %}
+{% block title %}Session {{ session.id[:8] }} — Harness{% endblock %}
+{% block content %}
+{# ------------------------------------------------------------------ #}
+{# Header — outside polling region (id never changes; status is in main) #}
+{# ------------------------------------------------------------------ #}
+<div style="display:flex; align-items:center; gap:12px; margin-bottom: 12px;">
+  <h1 style="margin:0;">Session <span class="id-short">{{ session.id[:8] }}</span></h1>
+  <span class="badge {{ session.status }}">{{ session.status }}</span>
+  <span class="badge stage">{{ session.current_stage }}</span>
+  <span class="muted">Created {{ session.created_at }}</span>
+</div>
+
+{# Action bar — Resume button + jump-to-awaiting CTA #}
+<div class="row-actions" style="margin-bottom: 16px;">
+  <button id="resume-btn" type="button">Resume</button>
+  {% if session.status == "awaiting_human" %}
+    <a href="#awaiting-panel" class="btn">Answer pending question</a>
+  {% endif %}
+  <span class="muted">Polls every 2s.</span>
+</div>
+
+{# ------------------------------------------------------------------ #}
+{# Awaiting form — OUTSIDE the polling refresh region                  #}
+{# ------------------------------------------------------------------ #}
+{% include "awaiting.html" %}
+
+{# ------------------------------------------------------------------ #}
+{# Main content — polled / replaced on refresh                          #}
+{# ------------------------------------------------------------------ #}
+<div id="main-content">
+  {% include "_session_main.html" %}
+</div>
+
+<script>
+  (function() {
+    const sessionId = {{ session.id | tojson }};
+
+    // Resume button
+    const resumeBtn = document.getElementById('resume-btn');
+    if (resumeBtn) {
+      resumeBtn.addEventListener('click', async function() {
+        resumeBtn.disabled = true;
+        resumeBtn.textContent = 'Running...';
+        try {
+          const resp = await fetch('/sessions/' + sessionId + '/resume', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: '{}'
+          });
+          if (!resp.ok) alert('Resume failed: ' + resp.status);
+        } catch (e) { alert('Error: ' + e); }
+        finally {
+          resumeBtn.disabled = false;
+          resumeBtn.textContent = 'Resume';
+          // Reload so the awaiting panel + header reflect the new state.
+          window.location.reload();
+        }
+      });
+    }
+
+    // Answer-form submission (each pending material has its own form).
+    document.querySelectorAll('form.answer-form').forEach(function(form) {
+      form.addEventListener('submit', async function(ev) {
+        ev.preventDefault();
+        const materialId = form.dataset.materialId;
+        const isApproval = form.dataset.isApproval === '1';
+        const resultDiv = form.querySelector('.form-result');
+        const submitter = ev.submitter;
+        const body = { material_id: materialId };
+        if (isApproval) {
+          body.approved = submitter && submitter.value === 'true';
+          const notesEl = form.querySelector('textarea[name="notes"]');
+          if (notesEl && notesEl.value) body.notes = notesEl.value;
+        } else {
+          const ansEl = form.querySelector('textarea[name="answer_text"]');
+          body.answer_text = ansEl ? ansEl.value : '';
+        }
+        // Disable inputs while in-flight.
+        form.querySelectorAll('button,textarea').forEach(function(el) { el.disabled = true; });
+        resultDiv.textContent = 'Submitting...';
+        try {
+          const resp = await fetch('/sessions/' + sessionId + '/answer', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body),
+          });
+          if (resp.ok) {
+            resultDiv.textContent = 'Submitted. Reloading...';
+            window.location.reload();
+          } else {
+            const txt = await resp.text();
+            resultDiv.textContent = 'Failed: ' + resp.status + ' — ' + txt;
+            form.querySelectorAll('button,textarea').forEach(function(el) { el.disabled = false; });
+          }
+        } catch (e) {
+          resultDiv.textContent = 'Error: ' + e;
+          form.querySelectorAll('button,textarea').forEach(function(el) { el.disabled = false; });
+        }
+      });
+    });
+
+    // Polling: only replace #main-content, leave the form region alone.
+    async function refresh() {
+      try {
+        const resp = await fetch(window.location.pathname + '?partial=1');
+        if (!resp.ok) return;
+        const html = await resp.text();
+        const main = document.getElementById('main-content');
+        if (main) main.innerHTML = html;
+      } catch (e) { /* swallow */ }
+    }
+    setInterval(refresh, 2000);
+  })();
+</script>
+{% endblock %}

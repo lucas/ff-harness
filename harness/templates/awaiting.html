@@ -1,0 +1,46 @@
+{# Pending-materials form fragment. Included from session.html. #}
+{# Outside the polling-refresh region so the user's typing isn't blown away. #}
+<div class="card" id="awaiting-panel">
+  <h2>Awaiting human input</h2>
+  {% if pending_materials %}
+    {% for m in pending_materials %}
+      {% set is_approval = m.content.kind == "approval" %}
+      <form class="answer-form" data-material-id="{{ m.id }}" data-is-approval="{{ '1' if is_approval else '0' }}" style="margin-bottom: 16px;">
+        {% if is_approval %}
+          <p>
+            <strong>Approval requested:</strong> {{ m.content.subject }}
+          </p>
+          {% if m.content.details %}
+            <details>
+              <summary>Details</summary>
+              <pre>{{ m.content.details | tojson(indent=2) }}</pre>
+            </details>
+          {% endif %}
+          <label for="notes-{{ m.id }}" class="muted" style="display:block; margin-top:8px;">Notes (optional):</label>
+          <textarea id="notes-{{ m.id }}" name="notes" placeholder="Optional notes for the agent..."></textarea>
+          <div class="row-actions" style="margin-top: 8px;">
+            <button type="submit" name="approved" value="true">Approve</button>
+            <button type="submit" name="approved" value="false" class="danger">Deny</button>
+          </div>
+        {% else %}
+          <p>
+            <strong>Question:</strong> {{ m.content.question }}
+          </p>
+          {% if m.content.options %}
+            <p class="muted">Suggested options:
+              {% for opt in m.content.options %}<code>{{ opt }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+            </p>
+          {% endif %}
+          <label for="answer-{{ m.id }}" class="muted" style="display:block; margin-top:8px;">Your answer:</label>
+          <textarea id="answer-{{ m.id }}" name="answer_text" required></textarea>
+          <div class="row-actions" style="margin-top: 8px;">
+            <button type="submit">Submit answer</button>
+          </div>
+        {% endif %}
+        <div class="form-result muted" style="margin-top:6px;"></div>
+      </form>
+    {% endfor %}
+  {% else %}
+    <div class="empty">Nothing pending.</div>
+  {% endif %}
+</div>

@@ -1,0 +1,80 @@
+{% extends "_base.html" %}
+{% block title %}Sessions — Harness{% endblock %}
+{% block content %}
+  <h1>Sessions</h1>
+  <div class="row-actions" style="margin-bottom: 16px;">
+    <button id="new-session-btn" type="button">New session</button>
+    <span class="muted">Auto-refreshes every 5s.</span>
+  </div>
+
+  <div id="sessions-table-wrap" class="card">
+    {% if sessions %}
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Status</th>
+          <th>Stage</th>
+          <th>Created</th>
+          <th>Updated</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for s in sessions %}
+        <tr>
+          <td>
+            <a href="/sessions/{{ s.id }}/view" class="id-short">{{ s.id[:8] }}</a>
+          </td>
+          <td><span class="badge {{ s.status }}">{{ s.status }}</span></td>
+          <td><span class="badge stage">{{ s.current_stage }}</span></td>
+          <td class="muted">{{ s.created_at }}</td>
+          <td class="muted">{{ s.updated_at }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="empty">No sessions yet. Click "New session" to create one.</div>
+    {% endif %}
+  </div>
+
+  <script>
+    (function() {
+      const btn = document.getElementById('new-session-btn');
+      btn.addEventListener('click', async function() {
+        btn.disabled = true;
+        try {
+          const resp = await fetch('/sessions', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: '{}'
+          });
+          if (!resp.ok) {
+            alert('Failed to create session: ' + resp.status);
+            btn.disabled = false;
+            return;
+          }
+          const data = await resp.json();
+          window.location.href = '/sessions/' + data.session_id + '/view';
+        } catch (e) {
+          alert('Error: ' + e);
+          btn.disabled = false;
+        }
+      });
+
+      async function refresh() {
+        try {
+          const resp = await fetch('/?partial=1');
+          if (!resp.ok) return;
+          const html = await resp.text();
+          const parser = new DOMParser();
+          const doc = parser.parseFromString(html, 'text/html');
+          const next = doc.getElementById('sessions-table-wrap');
+          const cur = document.getElementById('sessions-table-wrap');
+          if (next && cur) cur.innerHTML = next.innerHTML;
+        } catch (e) { /* swallow */ }
+      }
+      setInterval(refresh, 5000);
+    })();
+  </script>
+{% endblock %}
