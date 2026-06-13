@@ -1,54 +1,5 @@
 {% extends "_base.html" %}
 {% block title %}Session {{ session.id[:8] }} — Harness{% endblock %}
-{% block head %}
-<style>
-  /* Chat panel — scoped styles, kept inline to avoid editing _base.html. */
-  .chat-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px; padding: 16px; margin-bottom: 16px; }
-  .chat-card h2 { margin-top: 0; }
-  .chat-log {
-    max-height: 360px;
-    overflow-y: auto;
-    padding: 8px;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    margin-bottom: 12px;
-  }
-  .chat-row { display: flex; margin-bottom: 8px; }
-  .chat-row.user { justify-content: flex-end; }
-  .chat-row.agent { justify-content: flex-start; }
-  .chat-bubble {
-    max-width: 78%;
-    padding: 8px 12px;
-    border-radius: 12px;
-    font-size: 13px;
-    line-height: 1.4;
-    word-break: break-word;
-    white-space: pre-wrap;
-  }
-  .chat-row.user .chat-bubble { background: var(--accent); color: white; border-bottom-right-radius: 2px; }
-  .chat-row.agent .chat-bubble { background: var(--bg-card); color: var(--fg); border: 1px solid var(--border); border-bottom-left-radius: 2px; }
-  .chat-bubble .chat-badge {
-    display: inline-block;
-    font-size: 10px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    padding: 1px 6px;
-    border-radius: 6px;
-    background: var(--neutral);
-    color: white;
-    margin-right: 6px;
-    vertical-align: 1px;
-  }
-  .chat-bubble.tool-call { font-family: ui-monospace, monospace; font-size: 12px; }
-  .chat-bubble.tool-call code { background: rgba(0,0,0,0.04); padding: 1px 4px; border-radius: 3px; }
-  .chat-empty { color: var(--fg-faint); font-style: italic; padding: 8px 0; }
-  .chat-form textarea { min-height: 60px; }
-  .chat-form .row-actions { margin-top: 8px; }
-  .chat-error { color: var(--fail); margin-top: 6px; font-size: 12px; }
-</style>
-{% endblock %}
 {% block content %}
 {# ------------------------------------------------------------------ #}
 {# Header — outside polling region (id never changes; status is in main) #}
@@ -70,50 +21,7 @@
 </div>
 
 {# ------------------------------------------------------------------ #}
-{# Chat panel — unprompted user-to-agent conversation                  #}
-{# Polling intentionally removed in v1: POST /resume is synchronous,   #}
-{# no UI changes occur between explicit user actions. Use the Refresh  #}
-{# button (above) to re-load the page after the agent runs.            #}
-{# ------------------------------------------------------------------ #}
-<div class="chat-card" id="chat-panel">
-  <h2>Chat</h2>
-  <div class="chat-log" id="chat-log">
-    {% if chat_messages %}
-      {% for m in chat_messages %}
-        <div class="chat-row {{ m.role }}">
-          {% if m.role == "user" %}
-            <div class="chat-bubble">{{ m.text }}</div>
-          {% elif m.kind == "tool_call" %}
-            <div class="chat-bubble tool-call">
-              <span class="chat-badge">tool</span>
-              calling <code>{{ m.tool }}</code>
-              {% if m.text %}<span class="muted">— {{ m.text }}</span>{% endif %}
-            </div>
-          {% else %}
-            <div class="chat-bubble">
-              {% if m.badge %}<span class="chat-badge">{{ m.badge }}</span>{% endif %}
-              {{ m.text }}
-            </div>
-          {% endif %}
-        </div>
-      {% endfor %}
-    {% else %}
-      <div class="chat-empty">No messages yet. Send the first one below.</div>
-    {% endif %}
-  </div>
-  <form class="chat-form" id="chat-form" onsubmit="return false;">
-    <label for="chat-input" class="muted">Your message:</label>
-    <textarea id="chat-input" name="content" placeholder="Type a message to the agent..." required></textarea>
-    <div class="row-actions">
-      <button type="submit" id="chat-send-btn">Send</button>
-      <span class="muted">Sends an unprompted user message; the agent will react on its next turn.</span>
-    </div>
-    <div class="chat-error" id="chat-error"></div>
-  </form>
-</div>
-
-{# ------------------------------------------------------------------ #}
-{# Awaiting form — outside chat region                                 #}
+{# Awaiting form — pending question / approval (ask_user/request_approval) #}
 {# ------------------------------------------------------------------ #}
 {% include "awaiting.html" %}
 
@@ -127,10 +35,6 @@
 <script>
   (function() {
     const sessionId = {{ session.id | tojson }};
-
-    // Auto-scroll chat log to bottom on page load.
-    const log = document.getElementById('chat-log');
-    if (log) { log.scrollTop = log.scrollHeight; }
 
     // Resume button
     const resumeBtn = document.getElementById('resume-btn');
@@ -151,44 +55,6 @@
           resumeBtn.textContent = 'Resume';
           // Reload so the awaiting panel + header reflect the new state.
           window.location.reload();
-        }
-      });
-    }
-
-    // Chat send
-    const chatForm = document.getElementById('chat-form');
-    const chatInput = document.getElementById('chat-input');
-    const chatSendBtn = document.getElementById('chat-send-btn');
-    const chatError = document.getElementById('chat-error');
-    if (chatForm && chatInput && chatSendBtn) {
-      chatForm.addEventListener('submit', async function(ev) {
-        ev.preventDefault();
-        const content = chatInput.value.trim();
-        if (!content) { chatError.textContent = 'Message cannot be empty.'; return; }
-        chatError.textContent = '';
-        chatSendBtn.disabled = true;
-        chatInput.disabled = true;
-        chatSendBtn.textContent = 'Sending...';
-        try {
-          const resp = await fetch('/sessions/' + sessionId + '/message', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({content: content}),
-          });
-          if (resp.ok) {
-            window.location.reload();
-          } else {
-            const txt = await resp.text();
-            chatError.textContent = 'Failed: ' + resp.status + ' — ' + txt;
-            chatSendBtn.disabled = false;
-            chatInput.disabled = false;
-            chatSendBtn.textContent = 'Send';
-          }
-        } catch (e) {
-          chatError.textContent = 'Error: ' + e;
-          chatSendBtn.disabled = false;
-          chatInput.disabled = false;
-          chatSendBtn.textContent = 'Send';
         }
       });
     }

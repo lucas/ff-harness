@@ -1,6 +1,6 @@
 # HTTP API Reference — Harness v1
 
-The harness exposes six HTTP routes, all served by the FastAPI app in `harness/api/app.py`. Routes are thin: they validate input, delegate to `harness/services/store.py` or `harness/services/orchestrator.py`, and serialize the result. No business logic lives in handlers.
+The harness exposes five HTTP routes, all served by the FastAPI app in `harness/api/app.py`. Routes are thin: they validate input, delegate to `harness/services/store.py` or `harness/services/orchestrator.py`, and serialize the result. No business logic lives in handlers.
 
 ## Conventions
 
@@ -12,7 +12,7 @@ These conventions apply to every route. Endpoints document only deviations.
 - **Content type.** All requests and responses are `application/json; charset=utf-8`. Request bodies must be valid JSON; missing or malformed bodies yield `400`.
 - **Errors.** Non-2xx responses share the shape `{"error": "<short_code>", "detail": {...}}`. `error` is a stable machine code (`not_found`, `invalid_body`, `conflict`, `internal`); `detail` is a free-form dict with diagnostic fields.
 - **Status codes used.** `200 OK`, `201 Created`, `400 Bad Request`, `404 Not Found`, `409 Conflict`, `500 Internal Server Error`. No 3xx, no auth (single-user local app).
-- **Synchrony.** All routes are synchronous. `POST /sessions/{id}/resume`, `POST /sessions/{id}/answer`, and `POST /sessions/{id}/message` block until the orchestrator hits a pause/terminal/cap and may take many seconds.
+- **Synchrony.** All routes are synchronous. `POST /sessions/{id}/resume` and `POST /sessions/{id}/answer` block until the orchestrator hits a pause/terminal/cap and may take many seconds.
 
 ---
 
@@ -230,36 +230,6 @@ Submit a user's response to a pending question or approval request, then resume 
   - `409` — material is not pending (already answered or never was); `error="conflict"`.
   - `500` — unhandled exception during resume.
 - **Called by:** `awaiting.html` form submit.
-
----
-
-## `POST /sessions/{id}/message`
-
-Send an **unprompted** user chat message to the agent. Distinct from `/answer`, which replies to a specific pending material; `/message` injects a free-form `user`-role message into the conversation at any time — including after the session has reached `completed` (it is reactivated automatically).
-
-- **Method:** `POST`
-- **Path:** `/sessions/{id}/message`
-- **Path params:** `id` — session UUID7.
-- **Query params:** none.
-- **Request body:**
-  ```json
-  { "content": "build a one-page site for a coffee shop" }
-  ```
-  - `content` (required, non-empty string after stripping whitespace).
-- **Behavior:**
-  1. Validate `content`; `400` if missing / empty / whitespace.
-  2. Load session; `404` if missing.
-  3. Persist a `user_answer` material with `content={"answer_text": ..., "unprompted": true}` (direction `in`, `pending=false`).
-  4. Append a `human_resumed` event whose payload carries the same answer (the orchestrator's `_build_context` turns these into `role="user"` messages).
-  5. Flip session `status` to `active` (regardless of prior state).
-  6. Call `orchestrator.run_until_pause(session_id)`.
-- **Response body (200):** identical shape to `POST /sessions/{id}/resume`.
-- **Status codes:**
-  - `200` — message accepted and orchestrator returned cleanly.
-  - `400` — `content` missing / empty / not a string; `error="bad_request"`.
-  - `404` — session not found; `error="not_found"`.
-  - `500` — unhandled exception during resume.
-- **Called by:** the chat panel in `session.html`.
 
 ---
 

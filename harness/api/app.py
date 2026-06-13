@@ -92,19 +92,6 @@ class ResumeRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
 
-class MessageRequest(BaseModel):
-    """POST /sessions/{id}/message body — unprompted user chat message.
-
-    Validated in the handler (not via Pydantic constraints) so the empty-string
-    case returns the harness's standard `{error: "bad_request"}` shape rather
-    than the FastAPI 422 default.
-    """
-
-    content: str | None = None
-
-    model_config = ConfigDict(extra="ignore")
-
-
 # ---------------------------------------------------------------------------
 # Error helpers — every non-2xx body has shape {"error": <code>, "detail": {...}}
 # ---------------------------------------------------------------------------
@@ -252,81 +239,6 @@ def _models_from_env() -> dict:
         "code_primary": os.environ.get("MODEL_CODE", ""),
         "code_fallback": os.environ.get("MODEL_CODE_FALLBACK", ""),
     }
-
-
-def _truncate(value: object, limit: int = 80) -> str:
-    text = str(value) if value is not None else ""
-    if len(text) <= limit:
-        return text
-    return text[: limit - 1] + "…"
-
-
-def _build_chat_messages(events: list[dict]) -> list[dict]:
-    """Project the event log into a chat-style conversation for the UI.
-
-    Returns an ordered list of `{role, kind, text, badge?, tool?}` dicts:
-      - role='user'  for human_resumed events (we render the answer_text)
-      - role='agent' for worker_output envelopes (Final / Escalate / ToolCall)
-
-    Tool args are truncated to keep the panel readable. The template is the
-    only consumer; data is shape-stable but informal.
-    """
-    out: list[dict] = []
-    for e in events:
-        etype = e.get("type")
-        payload = e.get("payload") or {}
-        if not isinstance(payload, dict):
-            continue
-        if etype == EventType.HUMAN_RESUMED.value:
-            answer = payload.get("answer_or_decision") or {}
-            if not isinstance(answer, dict):
-                continue
-            text = answer.get("answer_text")
-            if not isinstance(text, str) or not text:
-                # Approval-shaped resumes don't have answer_text; skip the
-                # chat bubble (the approval card already shows the decision).
-                continue
-            out.append(
-                {
-                    "role": "user",
-                    "kind": "text",
-                    "text": text,
-                    "unprompted": bool(answer.get("unprompted")),
-                }
-            )
-        elif etype == EventType.WORKER_OUTPUT.value:
-            env = payload.get("envelope") or {}
-            if not isinstance(env, dict):
-                continue
-            env_type = env.get("type")
-            if env_type == "final":
-                out.append(
-                    {
-                        "role": "agent",
-                        "kind": "final",
-                        "text": str(env.get("summary", "")),
-                        "badge": "final",
-                    }
-                )
-            elif env_type == "escalate":
-                out.append(
-                    {
-                        "role": "agent",
-                        "kind": "escalate",
-                        "text": str(env.get("reason", "")),
-                        "badge": "escalate",
-                    }
-                )
-            elif env_type == "tool_call":
-                out.append(
-                    {
-                        "role": "agent",
-                        "kind": "tool_call",
-                        "tool": str(env.get("tool", "?")),
-                        "text": _truncate(env.get("args"), 80),
-                    }
-                )
-    return out
 
 
 def _summarize_event_payload(event: dict) -> str:
@@ -583,71 +495,6 @@ def _create_app_routes(app: FastAPI) -> None:
         result = _run_loop_for(ctx, session_id)
         return _serialize_run_result(result)
 
-    @app.post("/sessions/{session_id}/message")
-    def message_session(
-        session_id: str,
-        body: MessageRequest,
-        ctx: AppContext = Depends(get_app_context),
-    ) -> dict:
-        """Unprompted user chat message — distinct from /answer.
-
-        /answer replies to a specific pending material; /message lets the
-        operator inject a free-form user-role message at any time (even when
-        the session is already 'completed'). The orchestrator's build_messages
-        turns `human_resumed` events into role='user' messages, so the agent
-        sees the new message on its next turn.
-        """
-        # Validate content is a non-empty string.
-        if not isinstance(body.content, str) or not body.content.strip():
-            raise _bad_request(
-                "bad_request",
-                {"reason": "`content` must be a non-empty string"},
-            )
-        content = body.content
-
-        with open_connections(ctx) as conns:
-            assert conns.core_conn is not None
-            session = store.load_session(conns.core_conn, session_id)
-        if session is None:
-            raise _not_found("not_found", {"session_id": session_id})
-
-        with open_connections(ctx, session_id=session_id) as conns:
-            assert conns.core_conn is not None
-            assert conns.session_conn is not None
-            stage = session["current_stage"]
-            answer_content: dict[str, Any] = {
-                "answer_text": content,
-                "unprompted": True,
-            }
-            answer_mid = store.persist_material(
-                conns.session_conn,
-                direction=Direction.IN.value,
-                stage=stage,
-                type=MaterialType.USER_ANSWER.value,
-                content=answer_content,
-                pending=False,
-            )
-            store.append_event(
-                conns.session_conn,
-                type=EventType.HUMAN_RESUMED.value,
-                stage=stage,
-                payload={
-                    "material_id": answer_mid,
-                    "answer_or_decision": answer_content,
-                },
-                material_id=answer_mid,
-            )
-            # Reactivate the session even if completed/awaiting/failed so the
-            # orchestrator will take another turn in response to the new input.
-            store.update_session_status(
-                conns.core_conn,
-                session_id,
-                SessionStatus.ACTIVE.value,
-            )
-
-        result = _run_loop_for(ctx, session_id)
-        return _serialize_run_result(result)
-
     # -------------------- HTML routes (web UI) --------------------
 
     @app.get("/", response_class=HTMLResponse)
@@ -696,10 +543,6 @@ def _create_app_routes(app: FastAPI) -> None:
         # Pre-compute a short summary per event so templates stay logic-free.
         event_summaries = [_summarize_event_payload(e) for e in events]
 
-        # Chat panel projection — computed from the full event log so users
-        # see the entire conversation, not just the last _UI_EVENTS_CAP rows.
-        chat_messages = _build_chat_messages(events_all)
-
         alarms_ordered = list(unresolved) + list(resolved)
 
         models = _models_from_env()
@@ -714,7 +557,6 @@ def _create_app_routes(app: FastAPI) -> None:
             "events_total": events_total,
             "events_truncated": events_truncated,
             "event_summaries": event_summaries,
-            "chat_messages": chat_messages,
             "checkpoints": [_serialize_checkpoint(c) for c in checkpoints],
             "alarms": [_serialize_alarm(a) for a in alarms_ordered],
             "pending_materials": [
