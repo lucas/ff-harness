@@ -5,9 +5,9 @@ This file is the live state of the v1 build. It is self-sufficient: after `/clea
 ## Status snapshot
 
 - **Last updated:** 2026-06-13
-- **Current step:** Step 3 — Guardrails + Alarms (next up)
-- **Next step:** Step 4 — Tools + dispatcher
-- **Last green test:** `uv run pytest tests/` (52 passed in 0.25s — Steps 0/1/2 combined).
+- **Current step:** Step 4 — Tools + dispatcher (next up)
+- **Next step:** Step 5 — Validators + post-hooks
+- **Last green test:** `uv run pytest tests/` (95 passed in 0.33s — Steps 0/1/2/3 combined).
 - **Active blockers:** none
 
 ## The 12-step checklist
@@ -23,7 +23,7 @@ Each row is one step from the Build Order in `/Users/elroy/.claude/plans/ignore-
 - [x] **Step 2 — Envelope + Worker protocol + MockWorker.** Status: done (2026-06-13).
   - Gate: `uv run pytest tests/models/test_envelope.py tests/services/test_mock_worker.py`
   - Done when: envelope discriminated union parses each variant and rejects bad shapes; `MockWorker` pops scripted responses in order.
-- [ ] **Step 3 — Guardrails + Alarms.** Status: pending.
+- [x] **Step 3 — Guardrails + Alarms.** Status: done (2026-06-13).
   - Gate: `uv run pytest tests/services/test_guardrails.py tests/services/test_alarms.py`
   - Done when: all four guardrail functions return correct booleans on the fixture matrix; each of the 4 alarm types persists with correct severity and emits an `alarm_raised` event.
 - [ ] **Step 4 — Tools + dispatcher.** Status: pending.
