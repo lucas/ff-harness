@@ -5,9 +5,9 @@ This file is the live state of the v1 build. It is self-sufficient: after `/clea
 ## Status snapshot
 
 - **Last updated:** 2026-06-13
-- **Current step:** Step 2 — Envelope + Worker protocol + MockWorker (next up)
-- **Next step:** Step 3 — Guardrails + Alarms
-- **Last green test:** `uv run pytest tests/models/test_ids.py tests/services/test_store.py` (Step 1 gate, 24 passed in 0.19s).
+- **Current step:** Step 3 — Guardrails + Alarms (next up)
+- **Next step:** Step 4 — Tools + dispatcher
+- **Last green test:** `uv run pytest tests/` (52 passed in 0.25s — Steps 0/1/2 combined).
 - **Active blockers:** none
 
 ## The 12-step checklist
@@ -20,7 +20,7 @@ Each row is one step from the Build Order in `/Users/elroy/.claude/plans/ignore-
 - [x] **Step 1 — UUID7 helper + DDL + Store.** Status: done (2026-06-13).
   - Gate: `uv run pytest tests/models/test_ids.py tests/services/test_store.py`
   - Done when: `new_id()` returns chronologically-ordered UUID7s; all 6 tables round-trip through `store.py`; FK enforcement asserted; `recent_spend_today_usd` correct across sessions and `is_fallback` rows.
-- [ ] **Step 2 — Envelope + Worker protocol + MockWorker.** Status: pending.
+- [x] **Step 2 — Envelope + Worker protocol + MockWorker.** Status: done (2026-06-13).
   - Gate: `uv run pytest tests/models/test_envelope.py tests/services/test_mock_worker.py`
   - Done when: envelope discriminated union parses each variant and rejects bad shapes; `MockWorker` pops scripted responses in order.
 - [ ] **Step 3 — Guardrails + Alarms.** Status: pending.

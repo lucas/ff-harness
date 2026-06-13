@@ -1,0 +1,8 @@
+{
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonVersion": "3.14",
+  "pythonPlatform": "Darwin",
+  "include": ["harness", "tests"],
+  "extraPaths": [".venv/lib/python3.14/site-packages"]
+}
