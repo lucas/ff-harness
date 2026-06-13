@@ -1,3 +1,25 @@
 *.pdf
 .claude
 .env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Runtime durable state (SQLite + generated sites)
+data/
+sessions/
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+
+# Node
+node_modules/
+
+# OS
+.DS_Store

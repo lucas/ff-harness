@@ -13,7 +13,7 @@
   }
 
   /* Single US-Letter page when printed from Chrome */
-  @page { size: Letter; margin: 13mm 15mm; }
+  @page { size: Letter; margin: 12mm 15mm; }
 
   * { box-sizing: border-box; }
 
@@ -22,43 +22,42 @@
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
     color: var(--ink);
-    font-size: 10.4pt;
-    line-height: 1.34;
+    font-size: 10pt;
+    line-height: 1.3;
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
   }
 
-  /* On-screen: emulate a page so it looks like the PDF */
   .page {
     max-width: 7.0in;
     margin: 0 auto;
-    padding: 18px 4px;
+    padding: 16px 4px;
   }
 
   h1 {
-    font-size: 19pt;
+    font-size: 18pt;
     margin: 0 0 2px;
     letter-spacing: -0.01em;
   }
   .lead {
     color: var(--muted);
-    font-size: 9.2pt;
-    margin: 0 0 10px;
-    padding-bottom: 8px;
+    font-size: 9pt;
+    margin: 0 0 9px;
+    padding-bottom: 7px;
     border-bottom: 2px solid var(--accent);
   }
 
   h2 {
-    font-size: 10.6pt;
+    font-size: 10.2pt;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--accent);
-    margin: 11px 0 3px;
+    margin: 10px 0 3px;
     break-after: avoid;
     page-break-after: avoid;
   }
 
-  p { margin: 0 0 7px; }
+  p { margin: 0 0 6px; }
 
   ol.pillars {
     margin: 0;
@@ -88,6 +87,12 @@
     line-height: 18px;
   }
 
+  ul.tools {
+    margin: 3px 0 0;
+    padding-left: 16px;
+  }
+  ul.tools li { margin: 0 0 1px; }
+
   code {
     font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
     font-size: 0.86em;
@@ -114,27 +119,32 @@
 
   <div class="section">
     <h2>User story</h2>
-    <p>A <strong>website builder for non-technical users.</strong> A user submits a basic idea or change ("a landing page for my bakery"). The harness <strong>clarifies intent first</strong> — asking questions to gather details, then confirming the layout with a <strong>basic ASCII mockup</strong> before it builds. On approval it generates a simple, <strong>SEO-optimized HTML + CSS + JS</strong> page — regenerating <strong><code>sitemap.xml</code> after each iteration</strong> — and <strong>auto-commits every change to a local git repo</strong>, so all versions are tracked and revertable.</p>
+    <p>A <strong>website builder for non-technical users.</strong> A user submits a basic idea or change ("a landing page for my bakery"). The harness <strong>clarifies intent first</strong> — asking questions to gather details, then confirming the layout with a <strong>basic ASCII mockup</strong> before it builds. On approval it generates a simple, <strong>SEO-optimized HTML + CSS + JS</strong> page — regenerating <code>sitemap.xml</code> after each iteration — and <strong>auto-commits every change to a local git repo</strong>, so all versions are tracked and revertable.</p>
   </div>
 
   <div class="section">
     <h2>The harness</h2>
-    <p>A <strong>durable, resumable run orchestrator</strong>. It drives a worker through staged work, persists every step, and can resume after a crash or replay from any checkpoint. The worker is a thin, swappable plug. Priorities: <strong>durability, resilience, simplicity.</strong> Each run is a <strong>session</strong> with its own SQLite DB; a core DB indexes users/sessions; an append-only <strong>event log</strong> is the source of truth.</p>
+    <p>A <strong>durable, resumable run orchestrator</strong>. Each run is a <strong>session</strong> with its own SQLite DB; a core DB indexes users/sessions; an append-only <strong>event log</strong> is the source of truth, so a run survives crashes and can replay from any checkpoint. The worker is a thin, swappable plug. Priorities: <strong>durability, resilience, simplicity.</strong></p>
   </div>
 
   <div class="section">
     <h2>The four pillars</h2>
     <ol class="pillars">
-      <li><strong>Guardrails — declared constraints, enforced.</strong> Tool allow-lists, turn/token/time caps, a $1/day <strong>spend ceiling</strong>, and a gate that pauses for <strong>human approval every 10 iterations</strong>.</li>
-      <li><strong>Checkpoints — explicit pass/fail gates.</strong> Tiered verification: cheap deterministic checks first (valid HTML/CSS/JS, <strong>SEO tags + <code>sitemap.xml</code></strong>, schema — $0), then an <strong>independent verifier sub-agent</strong>, then a <strong>human</strong> (e.g. confirming the ASCII mockup). Results persist for replay.</li>
-      <li><strong>Material handling — typed I/O.</strong> The worker returns a strict JSON envelope — <code>tool_call</code>, <code>final</code>, or <code>escalate</code> — validated with Pydantic each turn. Generated files are versioned via <strong>automatic local git commits</strong>.</li>
-      <li><strong>Alarms — structured failure signals.</strong> Named alarms with severity, context, and a recommended action (<code>spend_cap_reached</code>, <code>iteration_limit_reached</code>, <code>output_schema_violation</code>) drive retry, escalate, or halt.</li>
+      <li><strong>The Loop.</strong> The bounded control cycle that drives the agent each turn: call the worker → validate its JSON output → dispatch (run a tool / finish / <strong>escalate to ask the user</strong>) → verify &amp; persist → advance or recover. Resumable from any checkpoint; capped so a confused agent can't run away.</li>
+      <li><strong>Tools.</strong> Typed functions the agent can call; the harness validates arguments, executes, and returns results as data. For the website builder:
+        <ul class="tools">
+          <li><code>ask_user</code> — ask the user clarifying questions</li>
+          <li><code>request_approval</code> — show the ASCII mockup, await sign-off</li>
+          <li><code>render_mockup</code> — ASCII wireframe from the layout spec</li>
+          <li><code>read</code> / <code>write</code> / <code>list</code> files — sandboxed page-file I/O</li>
+          <li><code>validate_site</code> — HTML/CSS/JS + SEO + sitemap checks</li>
+          <li><code>regenerate_seo_artifacts</code> — rebuild <code>sitemap.xml</code>, <code>robots.txt</code>, <code>llms.txt</code></li>
+          <li><code>git_history</code> / <code>git_revert</code> — view or undo prior versions</li>
+        </ul>
+      </li>
+      <li><strong>Guardrails.</strong> Declared constraints, enforced: tool allow-lists, turn/token/time caps, a <strong>$1/day spend ceiling</strong>, sandboxed file &amp; git paths, and a gate that pauses for <strong>human approval every 10 iterations</strong>.</li>
+      <li><strong>Observability.</strong> Every step is recorded to an append-only <strong>event log in the session's SQLite database</strong> — a structured entry per <strong>LLM turn</strong> (model, tokens, <strong>cost</strong>, latency), every tool call, and every guardrail decision — powering replay and cost tracking. Failures surface as <strong>alarms</strong>: named signals with severity, context, and a recommended action (<code>spend_cap_reached</code>, <code>iteration_limit_reached</code>, <code>output_schema_violation</code>).</li>
     </ol>
-  </div>
-
-  <div class="section">
-    <h2>How a turn runs</h2>
-    <p>Call the worker → validate JSON → dispatch (run a tool / finish / <strong>escalate to ask the user</strong>) → checkpoint → persist → advance or recover. Guardrails wrap the loop; alarms watch it.</p>
   </div>
 
   <div class="section">

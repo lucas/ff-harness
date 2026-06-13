@@ -1,6 +1,6 @@
 # Implementation Architecture
 
-How we will build the harness. A 500-word high-level summary lives in `overview.md`; the spec/design context lives in `harness.md` (do not edit — it's the document we follow); the challenge brief and requirements live in `mission.md`. This file tracks implementation decisions only.
+How we will build the harness. A 500-word high-level summary lives in `overview.md`; a component flowchart lives in `design.md`; product user stories live in `user-stories.md`; the spec/design context lives in `harness.md` (do not edit — it's the document we follow); the challenge brief and requirements live in `mission.md`. This file tracks implementation decisions only.
 
 **Design priorities (in order):** durability (state survives crashes), resilience (keeps working despite failures), simplicity. Language: **Python**. The harness is the focus; the agent/worker is a thin pluggable thing at the edge.
 
@@ -17,10 +17,14 @@ The harness is a **durable, resumable run orchestrator**. It drives a worker thr
 The orchestrator, store, and four pillars are **domain-agnostic core**. What makes a given agent is a **declared per-domain bundle** — its guardrails, tools, skills, and checkpoints. Swapping that bundle (and the worker) yields a new agent with no changes to the core. The three configurable layers are distinct by intent: **guardrails constrain** (enforced), **tools empower** (callable), **skills guide** (advisory context).
 
 ## Demo domain — website builder (non-technical users)
-The real input the harness runs on at demo time, and a concrete instance of the per-domain bundle. A user submits a basic idea or change; the harness clarifies intent, confirms layout via an ASCII mockup, then generates a simple, **SEO-optimized** HTML+CSS+JS page and regenerates `sitemap.xml` after each iteration — every change auto-committed to a local git repo for versioning.
-- **Tools:** ask the user a question, render an ASCII mockup, write/update page files, regenerate `sitemap.xml`, git commit.
-- **Skills:** clarifying-question technique + simple web-design & SEO guidance.
-- **Checkpoints:** intent clarified; ASCII mockup confirmed by the user; generated HTML/CSS/JS valid; **SEO checks pass** (title, meta description, semantic tags, Open Graph) and `sitemap.xml` regenerated & valid — all deterministic Tier 1.
+The real input the harness runs on at demo time, and a concrete instance of the per-domain bundle. A user submits a basic idea or change; the harness runs onboarding (the `bootstrap` skill) to capture intent as a **Business Brief**, confirms layout via an ASCII mockup, then generates a simple, **SEO-optimized** HTML+CSS+JS page and regenerates SEO artifacts (`sitemap.xml`, `robots.txt`, `llms.txt`) after each iteration — every change auto-committed to a local git repo for versioning. A single structured `layout_spec` drives both the ASCII mockup and the built HTML, so what the user approves is what ships. A final **intent audit** verifies the finished site against the Business Brief before it's considered done.
+- **Tools (agent-callable):** `ask_user` (clarifying questions → HITL), `request_approval` (present ASCII mockup, await approve/revise → HITL), `render_mockup(layout_spec)` (deterministic ASCII wireframe), `read_file` / `write_file` / `list_files` (sandboxed to `data/sites/{session}/`), `validate_site` (deterministic HTML/CSS/JS + SEO + sitemap + link checks), `regenerate_seo_artifacts` (`sitemap.xml` + `robots.txt` + `llms.txt`), `git_history` / `git_revert` (undo/change prior versions). `ask_user`/`request_approval` are the envelope's `escalate` action surfaced as tools.
+- **Harness-automatic each iteration:** `regenerate_seo_artifacts`, `validate_site`, then `git commit` — guaranteed, not left to the agent.
+- **Optional/advanced:** `lighthouse_audit` (SEO score via headless Chrome), `screenshot` (preview for the human UI; the free model isn't vision-capable), `delete_file`.
+- **Validators:** BeautifulSoup + lxml/html5lib (HTML & sitemap), tinycss2 (CSS), a JS parser or `node --check` (JS).
+- **Skills:** `bootstrap` (onboarding → Business Brief), clarifying-question technique, simple web-design & SEO guidance.
+- **Business Brief (in context):** onboarding captures a structured brief (name, industry, contact, locations, hours, aesthetic, colors, audience, pages, CTA, socials) with industry-aware defaults; confirmed by the user, persisted (`run_meta`/material), and injected into every `WorkerContext` so the build stays accurate.
+- **Checkpoints:** Business Brief confirmed; ASCII mockup confirmed by the user; generated HTML/CSS/JS valid; **SEO checks pass** (title, meta description, single H1 + heading hierarchy, semantic tags, `lang`, viewport, self-referencing canonical, Open Graph/Twitter, JSON-LD matching visible text, image `alt`); `sitemap.xml`/`robots.txt`/`llms.txt` regenerated & valid; no broken internal links (deterministic Tier 1); **final intent audit** — finished site verified against the Business Brief (name/contact/locations/services present & correct = deterministic; aesthetic/tone matches intent = verifier sub-agent), mismatches raise `intent_mismatch`.
 - **HITL:** the clarifying questions and mockup confirmation are the natural `awaiting_human` escalation points — the harness stops and asks rather than guessing (the PRD's stop-and-ask Should).
 - **Versioning:** automatic local git commits give a durable, revertable history of generated artifacts, complementing the event log.
 
@@ -80,8 +84,18 @@ Pillar definitions and the PRD-vs-deck mapping are in `harness.md`. Implementati
 | Material handling | `material.py` — typed input/output ports (incl. the JSON output envelope); validate on ingress/egress; serialize to the session store | Durability + resilience |
 | Alarms | `alarms.py` — named types, severity, context, recommended action; routed to handlers (log / escalate / halt) | Resilience |
 
-## Swappable worker boundary
-A minimal protocol — `Worker.act(context) -> result` — is the entire surface the harness knows. Any agent (Claude, another model, a mock) implements it; dropping one in requires no harness changes (the swappable-agent Should and the portability Bonus).
+## Swappable worker boundary (decoupling)
+The harness depends on an **abstraction**, never a concrete agent (dependency inversion). The entire surface is one method — `Worker.act(context: WorkerContext) -> WorkerResponse` — across a **data-only, serializable contract**. Dropping in a different agent is a config change, not a harness change (the swappable-agent Should + portability Bonus).
+
+- **`WorkerContext` in / `WorkerResponse` out** are plain Pydantic models — context (system prompt, messages, available tool schemas, relevant skills, state summary) in; the `tool_call`/`final`/`escalate` envelope out. No harness objects, DB handles, or provider types cross the line. Being serializable, a worker can even run out-of-process or in another language (optional; in-process is the simple default).
+- **Stateless worker.** The harness assembles the full context each turn (material handling + compaction) and owns all state — the loop, iteration/budget counters, persistence, guardrails, checkpoints, alarms. The worker is a pure function: context → next action.
+- **Propose, don't dispose.** The worker only *requests* a tool call; the harness validates (allow-list + arg schema), executes, and feeds the result back. The worker never touches the filesystem, git, network, or store.
+- **Capabilities passed in, not assumed.** Tools and skills arrive in the context (the per-domain bundle), so the worker hardcodes no tool names and the same worker works across domains.
+- **Provider adapters.** Concrete workers (`OpenRouterWorker`, `MockWorker`, a future `AnthropicWorker`) implement the protocol; provider specifics live in `llm.py`/the adapter, not the harness.
+- **Selection via config + registry.** `worker_id` in config → a factory builds the worker; swapping is a config change, and a second worker can be dropped in live.
+- **Locked by contract tests.** A shared suite every worker must pass; `MockWorker` is the reference implementation and also powers the Track-B harness tests.
+
+Tight-coupling smells to avoid: the worker importing `store`/`guardrails`/`checkpoints`; the worker running the loop or counting iterations; the worker executing tools itself; the harness branching on worker type; provider-specific fields leaking into the contract.
 
 ## Worker output contract (strict JSON envelope)
 Every worker turn must return one JSON object, discriminated on `type` — the entire contract, kept deliberately tiny:
@@ -149,7 +163,7 @@ The `events` log is also the audit trail — we log thoroughly, structured, per 
 
 Cost is recorded per call in `events` (full detail) and mirrored to the core `spend_log` (lightweight, cross-session) so the daily spend guardrail is a single query. Secrets are redacted; logging captures full payloads (durability) even though the live context is compacted.
 
-**Named alarm types so far:** `iteration_limit_reached`, `spend_cap_reached`, `tool_failed`, `checkpoint_failed_repeatedly`, `output_schema_violation`, `verification_failed`, `verifier_low_confidence`, `verifier_disagreement`, `max_subagent_depth_exceeded`, `subagent_failed`, `compaction_stalled` — each with severity, context, and recommended action.
+**Named alarm types so far:** `iteration_limit_reached`, `spend_cap_reached`, `tool_failed`, `checkpoint_failed_repeatedly`, `output_schema_violation`, `verification_failed`, `verifier_low_confidence`, `verifier_disagreement`, `max_subagent_depth_exceeded`, `subagent_failed`, `compaction_stalled`, `intent_mismatch` — each with severity, context, and recommended action.
 
 ## Module layout
 ```
@@ -158,7 +172,7 @@ static/             # landing page (HTML/JS/CSS, no build) — HITL + observabil
 Dockerfile
 docker-compose.yml  # bind-mount host folder → SQLite data
 data/               # host bind-mount target: harness.db + sessions/
-skills/             # skill markdown (incl. the verification skill)
+skills/             # skill markdown (e.g. bootstrap, verification)
 tests/              # mock worker, replay/golden runs, fault-injection, property tests
 harness/
   orchestrator.py   # the engine: resume run, drive stages, bounded loop
