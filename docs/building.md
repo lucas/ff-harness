@@ -41,7 +41,7 @@ Each row is one step from the Build Order in `/Users/elroy/.claude/plans/ignore-
 - [x] **Step 8 — LLMWorker × 2 + LLM client + 429 fallback.** Status: done (2026-06-13).
   - Gate: `uv run pytest tests/services/test_llm_worker.py` (offline) and `-m live` for the two real-call assertions.
   - Done when: envelope-repair retry covered; 429→fallback success writes `is_fallback=1` and emits `model_swapped`; 429→both-fail raises `tool_failed`; no-fallback-configured raises `tool_failed`; live chat + code calls return valid envelopes under $0.05.
-- [ ] **Step 9 — Domain bundle + FastAPI routes.** Status: pending.
+- [x] **Step 9 — Domain bundle + FastAPI routes.** Status: done (2026-06-13).
   - Gate: `uv run pytest tests/api/test_web_api.py`
   - Done when: every route in `docs/http-api.md` is implemented, returns the documented JSON shape, and the create→resume→detail→answer→resume→final flow passes end-to-end with MockWorker injected.
 - [ ] **Step 10 — Jinja2 templates.** Status: pending.
