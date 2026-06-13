@@ -5,9 +5,9 @@ This file is the live state of the v1 build. It is self-sufficient: after `/clea
 ## Status snapshot
 
 - **Last updated:** 2026-06-13
-- **Current step:** Step 1 — UUID7 helper + DDL + Store (next up)
-- **Next step:** Step 2 — Envelope + Worker protocol + MockWorker
-- **Last green test:** `uv run pytest --collect-only` (Step 0 gate, 0 tests collected, no errors); `uv sync` resolves 36 packages.
+- **Current step:** Step 2 — Envelope + Worker protocol + MockWorker (next up)
+- **Next step:** Step 3 — Guardrails + Alarms
+- **Last green test:** `uv run pytest tests/models/test_ids.py tests/services/test_store.py` (Step 1 gate, 24 passed in 0.19s).
 - **Active blockers:** none
 
 ## The 12-step checklist
@@ -17,7 +17,7 @@ Each row is one step from the Build Order in `/Users/elroy/.claude/plans/ignore-
 - [x] **Step 0 — Docs first.** Status: done (2026-06-13).
   - Gate: `uv run pytest --collect-only && uv sync`
   - Done when: `docs/v1-spec.md`, `docs/http-api.md`, `docs/test-plan.md`, `docs/building.md` are written; scoped edits applied to `implementation-architecture.md`, `overview.md`, `design.md`, `resume.md`, `skills/bootstrap.md`; `pyproject.toml`, `.env.example`, and empty layer folders are in place; `pytest --collect-only` and `uv sync` both succeed.
-- [ ] **Step 1 — UUID7 helper + DDL + Store.** Status: pending.
+- [x] **Step 1 — UUID7 helper + DDL + Store.** Status: done (2026-06-13).
   - Gate: `uv run pytest tests/models/test_ids.py tests/services/test_store.py`
   - Done when: `new_id()` returns chronologically-ordered UUID7s; all 6 tables round-trip through `store.py`; FK enforcement asserted; `recent_spend_today_usd` correct across sessions and `is_fallback` rows.
 - [ ] **Step 2 — Envelope + Worker protocol + MockWorker.** Status: pending.
