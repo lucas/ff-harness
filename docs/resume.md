@@ -2,7 +2,7 @@
 
 Load this file to restore full project context. It indexes the docs and captures current state.
 
-> **Maintenance protocol:** update this file after every change, and `git commit` after every change (no co-authors). `.env` is gitignored — never commit secrets.
+> **Maintenance protocol:** after every change, update `docs/building.md` (status, checklist, decision log), update `docs/resume.md` if structural, and `git commit` (no co-authors). `.env` is gitignored — never commit secrets.
 
 ## What we're building
 A **harness** (the framework an AI agent lives inside) for the 24-hour Build Challenge. Demo domain: a **website builder for non-technical small-business owners**. Priorities, in order: **durability, resilience, simplicity.** Stack: **Python + FastAPI in Docker**, OpenRouter free model under a **$1/day** cap.
@@ -12,9 +12,13 @@ A **harness** (the framework an AI agent lives inside) for the 24-hour Build Cha
 - Repo URL + deployed URL + `HARNESS.md` + 5-min demo video — **Sat Jun 13, 4:30 PM**.
 
 ## Docs index (`docs/`)
+- `building.md` — **master checklist + live resume context — load this first after `/clear`.** Per-step status, current state, decision log.
+- `v1-spec.md` — source of truth for v1 (data model, 5 checkpoints, 4 alarms, 6 tools, auto post-hook chain, two-worker setup, 429 fallback).
+- `http-api.md` — HTTP route reference (path, method, request/response bodies, status codes).
+- `test-plan.md` — per-step test gate matrix (one row per build step).
 - `mission.md` — challenge brief & requirements (the rubric).
 - `harness.md` — design context / spec we follow (**do not edit**).
-- `implementation-architecture.md` — full implementation tracking (the deep doc).
+- `implementation-architecture.md` — full implementation tracking (the deep doc; broader than v1).
 - `overview.md` — <500-word high-level; four pillars = **Loop · Tools · Guardrails · Observability**.
 - `overview.html` — printable single-page version of the overview.
 - `design.md` — Mermaid component diagram + turn-loop flowchart.
@@ -40,4 +44,4 @@ onboarding (`bootstrap` skill) → **Business Brief** (defaults baked in; inject
 - **Named alarms:** iteration_limit_reached, spend_cap_reached, tool_failed, checkpoint_failed_repeatedly, output_schema_violation, verification_failed, verifier_low_confidence, verifier_disagreement, max_subagent_depth_exceeded, subagent_failed, compaction_stalled, intent_mismatch.
 
 ## Next up
-Architecture is complete. Next deliverable: the **1-page Harness Planning Document**, then the Saturday deliverables (repo, deployed URL, `HARNESS.md`, demo video).
+Step 0 — Docs first (in progress). See `docs/building.md` for live status.

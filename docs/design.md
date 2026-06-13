@@ -2,6 +2,8 @@
 
 High-level component map and request flow. For the narrative see `overview.md`; for full implementation detail see `implementation-architecture.md`. Diagrams are Mermaid (render in GitHub/VS Code).
 
+> **v1 MVP omits the verifier sub-agent and `subagent.py`; checkpoints are deterministic only. The diagrams below show the full architecture — the v1-shipped subset is documented in `docs/v1-spec.md`.**
+
 ## Component architecture
 
 ```mermaid

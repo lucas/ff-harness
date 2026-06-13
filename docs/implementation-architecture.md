@@ -18,7 +18,8 @@ The orchestrator, store, and four pillars are **domain-agnostic core**. What mak
 
 ## Demo domain — website builder (non-technical users)
 The real input the harness runs on at demo time, and a concrete instance of the per-domain bundle. A user submits a basic idea or change; the harness runs onboarding (the `bootstrap` skill) to capture intent as a **Business Brief**, confirms layout via an ASCII mockup, then generates a simple, **SEO-optimized** HTML+CSS+JS page and regenerates SEO artifacts (`sitemap.xml`, `robots.txt`, `llms.txt`) after each iteration — every change auto-committed to a local git repo for versioning. A single structured `layout_spec` drives both the ASCII mockup and the built HTML, so what the user approves is what ships. A final **intent audit** verifies the finished site against the Business Brief before it's considered done.
-- **Tools (agent-callable):** `ask_user` (clarifying questions → HITL), `request_approval` (present ASCII mockup, await approve/revise → HITL), `render_mockup(layout_spec)` (deterministic ASCII wireframe), `read_file` / `write_file` / `list_files` (sandboxed to `data/sites/{session}/`), `validate_site` (deterministic HTML/CSS/JS + SEO + sitemap + link checks), `regenerate_seo_artifacts` (`sitemap.xml` + `robots.txt` + `llms.txt`), `git_history` / `git_revert` (undo/change prior versions). `ask_user`/`request_approval` are the envelope's `escalate` action surfaced as tools.
+- **Tools (agent-callable):** `ask_user` (clarifying questions → HITL), `request_approval` (present ASCII mockup, await approve/revise → HITL), `render_mockup(layout_spec)` (deterministic ASCII wireframe), `read_file` / `write_file` / `list_files` (sandboxed to `data/sites/{session}/`). `ask_user`/`request_approval` are the envelope's `escalate` action surfaced as tools.
+- **Harness-automatic each iteration (NOT worker tools):** `validate_site` → `regenerate_seo_artifacts` → `git_commit`. The harness enforces this chain after every successful `write_file`; the worker cannot call them directly. See `docs/v1-spec.md` § Auto post-hook chain.
 - **Harness-automatic each iteration:** `regenerate_seo_artifacts`, `validate_site`, then `git commit` — guaranteed, not left to the agent.
 - **Optional/advanced:** `lighthouse_audit` (SEO score via headless Chrome), `screenshot` (preview for the human UI; the free model isn't vision-capable), `delete_file`.
 - **Validators:** BeautifulSoup + lxml/html5lib (HTML & sitemap), tinycss2 (CSS), a JS parser or `node --check` (JS).
@@ -120,12 +121,17 @@ The contrast that keeps the configurable layers clean: **guardrails constrain** 
 ## LLM provider & cost control
 LLM calls go through OpenRouter (OpenAI-compatible API, base `https://openrouter.ai/api/v1`). The API key lives in `.env` (`OPENROUTER_API_KEY`), loaded from the environment — never logged, never committed.
 
-- **Model is configurable.** Default: `nvidia/nemotron-3-ultra-550b-a55b:free` (free tier — chosen because the key currently caps at $1/day). Model id, base URL, and per-model context window live in `config.py`, swappable without code changes.
+- **Two-worker setup (v1 default).** Stage-mapped via `domain.worker_for_stage(stage)`:
+  - **`chat` worker** — `MODEL_CHAT` primary (default `deepseek/deepseek-v4-flash:free`), `MODEL_CHAT_FALLBACK` (default `deepseek/deepseek-v4-flash` — the paid variant). Used for bootstrap, brief confirmation, mockup design, escalation/clarification.
+  - **`code` worker** — `MODEL_CODE` primary (default `qwen/qwen3-coder:free`), `MODEL_CODE_FALLBACK` (default empty — set to a paid coder when one is configured). Used for site-generation turns.
+  - Env vars: `MODEL_CHAT`, `MODEL_CHAT_FALLBACK`, `MODEL_CODE`, `MODEL_CODE_FALLBACK`, `OPENROUTER_API_KEY`. Model ids are env-configurable; no defaults reference Nemotron in v1.
+- **429 → fallback auto-swap.** When the primary returns HTTP 429, `llm.py` raises `RateLimited`; `LLMWorker` retries once with the configured fallback (if any), logs the call to `spend_log` with `is_fallback=1`, and the orchestrator appends a `model_swapped` event (`{from, to, reason: 'rate_limited'}`) so the swap is visible in the UI. If the fallback also 429s or no fallback is set, a `tool_failed` alarm is raised.
 - **Spend ceiling is a declared guardrail.** Default cap **$1/day**, configurable. Before each call the guardrail sums today's `spend_log` (core DB) and blocks if the cap would be exceeded → `spend_cap_reached` alarm → escalate. Free models report $0 but the path is always enforced.
-- Free tier also rate-limits requests; 429s are handled as transient (retry/backoff), and a sustained block escalates.
-- `llm.py` is provider-agnostic; OpenRouter is one implementation. Each response yields tokens in/out, cost, latency, and model id — captured for logging and the spend ledger.
+- `llm.py` is provider-agnostic; OpenRouter is one implementation. Each response yields tokens in/out, cost, latency, and the exact model id used — captured per call to `spend_log` (with `is_fallback`) and the event log.
 
 ## Context management & compaction
+> **Out of scope for v1 — deferred to Tier 2; see `docs/v1-spec.md`.**
+
 To continue past a model's hard context limit, `context.py` manages the worker's working context and **compacts** when it nears a configurable threshold (fraction of the model's window).
 
 - On breach: summarize older turns/tool-results into a compact summary that preserves the task, decisions, current state, open items, and last checkpoint; replace the verbose history with it. The summarization is itself an LLM call (cheapest configured model).
@@ -133,6 +139,8 @@ To continue past a model's hard context limit, `context.py` manages the worker's
 - A `context_compacted` event logs before/after token counts; repeated compaction with no progress raises an alarm.
 
 ## Sub-agents (nested sessions)
+> **Out of scope for v1 — deferred to Tier 2; see `docs/v1-spec.md`.**
+
 A sub-agent is the **same harness loop running in its own session** (`sessions/{uuid}.db`) with fresh context, spawned by a parent worker via a `spawn_subagent` tool. Only the sub-agent's final result re-enters the parent context — its internal turns stay in its own session, so the parent's context is preserved (complements compaction).
 
 - Lineage: the child `sessions` row sets `parent_session_id`; the parent logs `subagent_spawned` (child id) and `subagent_result` events. The session tree is fully durable and replayable.
@@ -140,6 +148,8 @@ A sub-agent is the **same harness loop running in its own session** (`sessions/{
 - `subagent.py` owns spawn/await; each sub-agent can carry its own skills/tools/worker.
 
 ## Verification strategy
+> **v1 ships Tier 1 (deterministic) checkpoints only; verifier sub-agent (Tier 2) deferred. See `docs/v1-spec.md` § The 5 checkpoints.**
+
 Two tracks: confirming the worker's output (A) and confirming the harness itself (B).
 
 **Track A — output verification (tiered, confidence-gated).** A checkpoint runs tiers in order, stopping as soon as one can decide; cost rises with tier.
@@ -165,7 +175,11 @@ Cost is recorded per call in `events` (full detail) and mirrored to the core `sp
 
 **Named alarm types so far:** `iteration_limit_reached`, `spend_cap_reached`, `tool_failed`, `checkpoint_failed_repeatedly`, `output_schema_violation`, `verification_failed`, `verifier_low_confidence`, `verifier_disagreement`, `max_subagent_depth_exceeded`, `subagent_failed`, `compaction_stalled`, `intent_mismatch` — each with severity, context, and recommended action.
 
+> **v1 ships only 4 of these alarms:** `iteration_limit_reached`, `spend_cap_reached`, `output_schema_violation`, `tool_failed`. The rest are deferred (they depend on the verifier sub-agent, sub-agents, context compaction, or the intent-audit checkpoint — all Tier 2). See `docs/v1-spec.md` § The 4 alarms.
+
 ## Module layout
+> **v1 file structure is organized by layer (`models/`, `services/`, `domain/`, `api/`, `templates/`) — see `docs/v1-spec.md` § File structure (by layer) for the shipped layout.** The flat layout below is the original architectural sketch and is retained here for historical context.
+
 ```
 app.py              # FastAPI: harness HTTP API + static serving
 static/             # landing page (HTML/JS/CSS, no build) — HITL + observability surface

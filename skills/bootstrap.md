@@ -50,3 +50,9 @@ Guide a non-technical small-business owner from a vague idea to a confirmed **Bu
 
 ## Output: the Business Brief
 A structured record of every field above (the chosen value, and whether it was a default). It is confirmed by the user, stored with the session, injected into the worker's context on every turn, and is the reference the final **intent audit** verifies the finished site against.
+
+## Integration with WorkerContext
+
+This skill's content is baked into the `system_prompt` field of every `WorkerContext` during the `bootstrap` stage — until the Business Brief is captured and user-approved, the worker sees these instructions verbatim each turn. Once the user approves the brief via `request_approval`, the harness persists it as a `business_brief` material row (direction=`out`, type=`business_brief`). From that point forward, the orchestrator reads the latest `business_brief` material and surfaces it into every subsequent `WorkerContext` as `state.brief`, so the mockup and build stages always have the confirmed brief available without re-running onboarding.
+
+The bootstrap stage runs on the **`chat` worker** (`MODEL_CHAT`), not the code worker — onboarding is conversational reasoning over defaults, not code generation. Stage→worker routing happens in `domain/website_builder.py`.

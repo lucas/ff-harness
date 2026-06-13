@@ -1,0 +1,238 @@
+# HTTP API Reference — Harness v1
+
+The harness exposes five HTTP routes, all served by the FastAPI app in `harness/api/app.py`. Routes are thin: they validate input, delegate to `harness/services/store.py` or `harness/services/orchestrator.py`, and serialize the result. No business logic lives in handlers.
+
+## Conventions
+
+These conventions apply to every route. Endpoints document only deviations.
+
+- **Identifiers.** All `id` fields (`session_id`, `material_id`, `event_id`, `checkpoint_id`, `alarm_id`) are UUID7 strings stored as `TEXT` (full canonical form, e.g. `0190a8d4-9b1c-7c3e-9c4d-8f2e1a5b6c7d`). UUID7 is time-ordered so ordering by `id` yields chronological order. IDs are minted server-side by `harness/models/ids.new_id()`; clients never supply them.
+- **Timestamps.** Every `*_at` / `ts` field is an ISO 8601 string in UTC with second precision, e.g. `2026-06-13T14:22:31Z`.
+- **Money.** Every `*_usd` field is a float in US dollars. Free-tier OpenRouter calls record `0.0`.
+- **Content type.** All requests and responses are `application/json; charset=utf-8`. Request bodies must be valid JSON; missing or malformed bodies yield `400`.
+- **Errors.** Non-2xx responses share the shape `{"error": "<short_code>", "detail": {...}}`. `error` is a stable machine code (`not_found`, `invalid_body`, `conflict`, `internal`); `detail` is a free-form dict with diagnostic fields.
+- **Status codes used.** `200 OK`, `201 Created`, `400 Bad Request`, `404 Not Found`, `409 Conflict`, `500 Internal Server Error`. No 3xx, no auth (single-user local app).
+- **Synchrony.** All routes are synchronous. `POST /sessions/{id}/resume` and `POST /sessions/{id}/answer` block until the orchestrator hits a pause/terminal/cap and may take many seconds.
+
+---
+
+## `POST /sessions`
+
+Create a new session and persist its row in the core DB.
+
+- **Method:** `POST`
+- **Path:** `/sessions`
+- **Query params:** none.
+- **Request body:** `{}` (empty object). v1 has no per-session config — the domain bundle decides everything.
+- **Response body (201):**
+  ```json
+  {
+    "session_id": "0190a8d4-9b1c-7c3e-9c4d-8f2e1a5b6c7d",
+    "status": "active",
+    "current_stage": "bootstrap"
+  }
+  ```
+- **Status codes:**
+  - `201` — session created. Per-session DB at `data/sessions/{session_id}.db` initialized with all four tables.
+  - `400` — body is not valid JSON.
+  - `500` — DB initialization failed.
+- **Called by:** `index.html` "New session" form (POSTs, then redirects to `/sessions/{id}`).
+
+---
+
+## `GET /sessions`
+
+List every session in the core DB, newest first (ordered by `id` descending — UUID7 is time-ordered).
+
+- **Method:** `GET`
+- **Path:** `/sessions`
+- **Query params:** none in v1.
+- **Request body:** none.
+- **Response body (200):**
+  ```json
+  {
+    "sessions": [
+      {
+        "id": "0190a8d4-9b1c-7c3e-9c4d-8f2e1a5b6c7d",
+        "status": "awaiting_human",
+        "current_stage": "build",
+        "created_at": "2026-06-13T14:00:00Z",
+        "updated_at": "2026-06-13T14:08:11Z"
+      },
+      {
+        "id": "0190a8a1-1234-7abc-9def-1234567890ab",
+        "status": "completed",
+        "current_stage": "done",
+        "created_at": "2026-06-12T18:42:09Z",
+        "updated_at": "2026-06-12T18:55:01Z"
+      }
+    ]
+  }
+  ```
+- **Status codes:**
+  - `200` — always, even when the list is empty (returns `{"sessions": []}`).
+  - `500` — DB read failed.
+- **Called by:** `index.html` (rendered server-side on page load; also re-fetched by the 2-second poll on the same page).
+
+---
+
+## `GET /sessions/{id}`
+
+Full session detail: the session row plus every log surface needed to render the session detail template without further fetches.
+
+- **Method:** `GET`
+- **Path:** `/sessions/{id}`
+- **Path params:** `id` — session UUID7.
+- **Query params:** none in v1.
+- **Request body:** none.
+- **Response body (200):**
+  ```json
+  {
+    "session": {
+      "id": "0190a8d4-9b1c-7c3e-9c4d-8f2e1a5b6c7d",
+      "status": "awaiting_human",
+      "current_stage": "build",
+      "iter_since_approval": 3,
+      "created_at": "2026-06-13T14:00:00Z",
+      "updated_at": "2026-06-13T14:08:11Z"
+    },
+    "events": [
+      {
+        "id": "0190a8d4-9b1d-7000-8000-000000000001",
+        "ts": "2026-06-13T14:00:01Z",
+        "type": "worker_input",
+        "stage": "bootstrap",
+        "payload": {"model": "deepseek/deepseek-v4-flash:free", "messages_count": 2, "tokens_estimate": 412},
+        "material_id": null,
+        "checkpoint_id": null,
+        "alarm_id": null
+      }
+    ],
+    "checkpoints": [
+      {
+        "id": "0190a8d4-9c10-7000-8000-000000000002",
+        "name": "site_valid",
+        "stage": "build",
+        "status": "fail",
+        "criteria_results": {"html5_parses": true, "has_title": false, "has_meta_viewport": true, "has_lang": true, "has_h1": true, "css_parses": true},
+        "material_id": "0190a8d4-9c00-7000-8000-000000000003",
+        "created_at": "2026-06-13T14:07:55Z"
+      }
+    ],
+    "alarms": [
+      {
+        "id": "0190a8d4-9c12-7000-8000-000000000004",
+        "type": "tool_failed",
+        "severity": "error",
+        "context": {"tool": "write_file", "args": {"path": "../etc/passwd"}, "error_kind": "path_outside_sandbox", "error_message": "path escapes sandbox"},
+        "recommended_action": "Reject the write and ask the worker to retry with a path inside the sandbox.",
+        "stage": "build",
+        "triggered_by_event_id": "0190a8d4-9c11-7000-8000-000000000005",
+        "resolved": false,
+        "created_at": "2026-06-13T14:07:30Z"
+      }
+    ],
+    "pending_materials": [
+      {
+        "id": "0190a8d4-9c20-7000-8000-000000000006",
+        "direction": "out",
+        "stage": "build",
+        "type": "pending_question",
+        "content": {"question": "The site failed validation 3 times. Continue?", "options": ["continue", "abort"]},
+        "pending": true,
+        "created_at": "2026-06-13T14:08:11Z"
+      }
+    ],
+    "spend_summary": {
+      "total_usd": 0.0412,
+      "by_model": {
+        "deepseek/deepseek-v4-flash:free": 0.0,
+        "deepseek/deepseek-v4-flash": 0.0412,
+        "qwen/qwen3-coder:free": 0.0
+      },
+      "fallback_count": 2
+    }
+  }
+  ```
+- **Notes on shape:** `events` is ordered ascending by `id`. `checkpoints` and `alarms` are ordered ascending by `created_at`. `pending_materials` includes only rows with `pending=1` and is the input list for the awaiting-human form. `spend_summary` is computed by `store.spend_summary_for_session(session_id)` — `total_usd` sums all `cost_usd`, `by_model` groups by exact model string, `fallback_count` counts rows where `is_fallback=1`.
+- **Status codes:**
+  - `200` — session found.
+  - `404` — no session with that id; `error="not_found"`.
+  - `500` — DB read failed.
+- **Called by:** `session.html` on initial render and every 2 seconds via vanilla `fetch` polling.
+
+---
+
+## `POST /sessions/{id}/resume`
+
+Drive the orchestrator until it hits a pause, terminal state, or cap. Synchronous — the request blocks for the duration of the loop.
+
+- **Method:** `POST`
+- **Path:** `/sessions/{id}/resume`
+- **Path params:** `id` — session UUID7.
+- **Query params:** none.
+- **Request body:** `{}` (empty object).
+- **Behavior:** calls `orchestrator.run_until_pause(session_id)`. The orchestrator loads session state, runs turns via the stage-mapped worker, dispatches tools, runs the post-hook chain after every `write_file`, evaluates checkpoints, persists events/materials/alarms, and exits cleanly when it hits any of: a `final` envelope, an `escalate` envelope, an `ask_user`/`request_approval` tool call, the 10-iteration human-approval gate, or the $1/day spend cap.
+- **Response body (200):**
+  ```json
+  {
+    "session_id": "0190a8d4-9b1c-7c3e-9c4d-8f2e1a5b6c7d",
+    "status": "awaiting_human",
+    "current_stage": "build",
+    "terminal": false,
+    "paused_reason": "awaiting_human"
+  }
+  ```
+  - `terminal` is `true` only when `status` is `completed` or `failed`; otherwise `false`.
+  - `paused_reason` is one of `"awaiting_human"`, `"spend_cap"`, `"turn_cap"`, or `null` (the latter when `terminal=true`).
+- **Status codes:**
+  - `200` — orchestrator returned cleanly (including pause states).
+  - `404` — no session with that id; `error="not_found"`.
+  - `409` — session is already `completed` or `failed`; `error="conflict"`, `detail={"status": "..."}`.
+  - `500` — unhandled orchestrator exception (the orchestrator catches its own errors into the event log; a 500 here means a bug).
+- **Called by:** `session.html` "Resume" button.
+
+---
+
+## `POST /sessions/{id}/answer`
+
+Submit a user's response to a pending question or approval request, then resume the loop. The body shape depends on the pending material's `type`: a `pending_question` waiting on `ask_user` expects `answer_text`; one waiting on `request_approval` expects `approved` (with optional `notes`). The handler reads the pending material to decide which `MaterialType` to persist (`user_answer` vs `user_approval`).
+
+- **Method:** `POST`
+- **Path:** `/sessions/{id}/answer`
+- **Path params:** `id` — session UUID7.
+- **Query params:** none.
+- **Request body:**
+  ```json
+  {
+    "material_id": "0190a8d4-9c20-7000-8000-000000000006",
+    "answer_text": "Continue.",
+    "approved": null,
+    "notes": null
+  }
+  ```
+  - `material_id` (required) — the `pending_question` material the user is responding to.
+  - `answer_text` (optional) — required when the pending material backs `ask_user`.
+  - `approved` (optional bool) — required when the pending material backs `request_approval`.
+  - `notes` (optional string) — only meaningful with `approved`.
+- **Behavior:**
+  1. Load the pending material; `404` if missing, `409` if not pending.
+  2. Persist either a `user_answer` material (`content={"answer_text": ...}`) or a `user_approval` material (`content={"approved": ..., "notes": ...}`).
+  3. `mark_material_resolved(material_id)` on the original pending row.
+  4. Update session `status` to `active`.
+  5. Append a `human_resumed` event.
+  6. Call `orchestrator.run_until_pause(session_id)`.
+- **Response body (200):** identical shape to `POST /sessions/{id}/resume`.
+- **Status codes:**
+  - `200` — answer accepted and orchestrator returned cleanly.
+  - `400` — body invalid, or shape doesn't match the pending material's type (e.g. `approved` missing for an approval request); `error="invalid_body"`.
+  - `404` — session or material not found; `error="not_found"`.
+  - `409` — material is not pending (already answered or never was); `error="conflict"`.
+  - `500` — unhandled exception during resume.
+- **Called by:** `awaiting.html` form submit.
+
+---
+
+## Out of scope for v1
+
+`PATCH /sessions/{id}`, `DELETE /sessions/{id}`, paginated event fetch, auth — all deferred. The five routes above are sufficient for the demo flow and the four rubric pillars.

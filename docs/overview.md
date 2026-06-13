@@ -13,14 +13,13 @@ A **durable, resumable run orchestrator**. Each run is a **session** with its ow
 
 **1. The Loop.** The bounded control cycle that drives the agent each turn: call the worker → validate its JSON output → dispatch (run a tool / finish / **escalate to ask the user**) → verify & persist → advance or recover. Resumable from any checkpoint; capped so a confused agent can't run away.
 
-**2. Tools.** Typed functions the agent can call; the harness validates arguments, executes, and returns results as data. For the website builder:
+**2. Tools.** Typed functions the agent can call; the harness validates arguments, executes, and returns results as data. For the website builder, the 6 worker-callable tools are:
 - `ask_user` — ask the user clarifying questions
 - `request_approval` — show the ASCII mockup, await sign-off
 - `render_mockup` — ASCII wireframe from the layout spec
-- `read` / `write` / `list` files — sandboxed page-file I/O
-- `validate_site` — HTML/CSS/JS + SEO + sitemap checks
-- `regenerate_seo_artifacts` — rebuild `sitemap.xml`, `robots.txt`, `llms.txt`
-- `git_history` / `git_revert` — view or undo prior versions
+- `read_file` / `write_file` / `list_files` — sandboxed page-file I/O
+
+> SEO regeneration, site validation, and git commits run automatically after each `write_file` (the harness post-hook chain) and are not callable by the worker — see `docs/v1-spec.md`.
 
 **3. Guardrails.** Declared constraints, enforced: tool allow-lists, turn/token/time caps, a **$1/day spend ceiling**, sandboxed file & git paths, and a gate that pauses for **human approval every 10 iterations**.
 

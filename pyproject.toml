@@ -1,0 +1,39 @@
+[project]
+name = "harness"
+version = "0.1.0"
+description = "Durable, resumable agent harness for the 24-hour Build Challenge — website-builder demo"
+requires-python = ">=3.12"
+dependencies = [
+  "pydantic>=2.0",
+  "html5lib",
+  "tinycss2",
+  "uuid_utils",
+  "httpx",
+  "jinja2",
+  "fastapi",
+  "uvicorn[standard]",
+  "python-dotenv",
+]
+
+[dependency-groups]
+dev = [
+  "pytest",
+  "pytest-asyncio",
+  "httpx",
+]
+
+[tool.uv]
+exclude-newer = "7 days"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "live: requires live OpenRouter API access (opt-in via -m live)",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["harness"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
