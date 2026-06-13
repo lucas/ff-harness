@@ -5,9 +5,9 @@ This file is the live state of the v1 build. It is self-sufficient: after `/clea
 ## Status snapshot
 
 - **Last updated:** 2026-06-13
-- **Current step:** Step 4 — Tools + dispatcher (next up)
-- **Next step:** Step 5 — Validators + post-hooks
-- **Last green test:** `uv run pytest tests/` (95 passed in 0.33s — Steps 0/1/2/3 combined).
+- **Current step:** Step 5 — Validators + post-hooks (next up)
+- **Next step:** Step 6 — Checkpoints
+- **Last green test:** `uv run pytest tests/` (122 passed — Steps 0/1/2/3/4 combined); `uv run pyright harness/ tests/` (0 errors).
 - **Active blockers:** none
 
 ## The 12-step checklist
@@ -26,7 +26,7 @@ Each row is one step from the Build Order in `/Users/elroy/.claude/plans/ignore-
 - [x] **Step 3 — Guardrails + Alarms.** Status: done (2026-06-13).
   - Gate: `uv run pytest tests/services/test_guardrails.py tests/services/test_alarms.py`
   - Done when: all four guardrail functions return correct booleans on the fixture matrix; each of the 4 alarm types persists with correct severity and emits an `alarm_raised` event.
-- [ ] **Step 4 — Tools + dispatcher.** Status: pending.
+- [x] **Step 4 — Tools + dispatcher.** Status: done (2026-06-13).
   - Gate: `uv run pytest tests/services/test_tools.py`
   - Done when: each of the 6 tools tested on happy + failure path; non-allow-list tool denied + alarm raised; `write_file` rejects sandbox escapes.
 - [ ] **Step 5 — Validators + post-hooks.** Status: pending.
