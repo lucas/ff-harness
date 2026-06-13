@@ -399,6 +399,164 @@ class TestBuildConversation:
 
 
 # ---------------------------------------------------------------------------
+# Markdown rendering for agent bubbles
+# ---------------------------------------------------------------------------
+
+
+class TestMarkdownRendering:
+    """Agent bubbles whose body comes from the LLM (final.summary,
+    escalate.reason, ask_user.question, request_approval.subject) must be
+    passed through the markdown renderer so `**bold**` and bullet lists
+    look right in the chat panel. Internal summary strings (tool-call
+    summaries we constructed) must NOT be markdown-rendered — they're
+    already formatted. The raw text always remains available on ``body``
+    for tests/debug. ``mistune`` is configured with ``escape=True`` so
+    embedded HTML in untrusted LLM output cannot inject scripts.
+    """
+
+    def test_agent_bubble_for_final_renders_markdown(self) -> None:
+        events = [
+            _event(
+                "worker_output",
+                {"envelope": {"type": "final", "summary": "**Done!** Site shipped."}},
+            )
+        ]
+        msgs = view_helpers.build_conversation(events, {})
+        assert msgs[0]["body"] == "**Done!** Site shipped."
+        assert "<strong>Done!</strong>" in msgs[0]["body_html"]
+
+    def test_agent_bubble_for_escalate_renders_markdown(self) -> None:
+        events = [
+            _event(
+                "worker_output",
+                {"envelope": {"type": "escalate", "reason": "*blocked* on input"}},
+            )
+        ]
+        msgs = view_helpers.build_conversation(events, {})
+        assert "<em>blocked</em>" in msgs[0]["body_html"]
+        assert msgs[0]["body"] == "*blocked* on input"
+
+    def test_agent_bubble_for_ask_user_renders_markdown(self) -> None:
+        events = [
+            _event(
+                "worker_output",
+                {
+                    "envelope": {
+                        "type": "tool_call",
+                        "tool": "ask_user",
+                        "args": {"question": "Which **theme** do you prefer?"},
+                    }
+                },
+            )
+        ]
+        msgs = view_helpers.build_conversation(events, {})
+        assert "<strong>theme</strong>" in msgs[0]["body_html"]
+
+    def test_agent_bubble_for_request_approval_renders_markdown(self) -> None:
+        events = [
+            _event(
+                "worker_output",
+                {
+                    "envelope": {
+                        "type": "tool_call",
+                        "tool": "request_approval",
+                        "args": {"subject": "ship the **MVP** site"},
+                    }
+                },
+            )
+        ]
+        msgs = view_helpers.build_conversation(events, {})
+        # Body keeps the literal markdown subject.
+        assert msgs[0]["body"] == "Requesting approval: ship the **MVP** site"
+        # body_html has the bold rendered.
+        assert "<strong>MVP</strong>" in msgs[0]["body_html"]
+
+    def test_agent_bubble_for_tool_call_summary_is_not_markdown_rendered(self) -> None:
+        events = [
+            _event(
+                "worker_output",
+                {
+                    "envelope": {
+                        "type": "tool_call",
+                        "tool": "write_file",
+                        "args": {"path": "index.html", "content": "<html/>"},
+                    }
+                },
+            )
+        ]
+        msgs = view_helpers.build_conversation(events, {})
+        # Internal summary string — must not be wrapped in a <p> by markdown
+        # and must not contain rendered markdown elements.
+        assert msgs[0]["body"] == "Wrote index.html (7 bytes)"
+        # body_html is HTML-escaped plain text — no <p> wrapping, no <strong>.
+        assert "<p>" not in msgs[0]["body_html"]
+        assert "<strong>" not in msgs[0]["body_html"]
+        # And the visible text matches the body.
+        assert "Wrote index.html (7 bytes)" in msgs[0]["body_html"]
+
+    def test_markdown_render_escapes_embedded_html(self) -> None:
+        """LLM output is untrusted — a `<script>` token in the body MUST NOT
+        survive as a live tag in body_html. mistune's escape=True handles this.
+
+        Markdown around the escaped HTML still renders normally — we use a
+        paragraph break so the **bold** span isn't fused into the same inline
+        token as the (now-escaped) ``<script>``.
+        """
+        events = [
+            _event(
+                "worker_output",
+                {
+                    "envelope": {
+                        "type": "final",
+                        "summary": "<script>alert(1)</script>\n\n**bold**",
+                    }
+                },
+            )
+        ]
+        msgs = view_helpers.build_conversation(events, {})
+        html_out = msgs[0]["body_html"]
+        # No live <script> tag.
+        assert "<script>" not in html_out
+        assert "&lt;script&gt;" in html_out
+        # **bold** still renders.
+        assert "<strong>bold</strong>" in html_out
+
+    def test_user_bubble_body_html_is_escaped_plain(self) -> None:
+        """User bubbles are not markdown — plain text, HTML-escaped, newlines
+        become <br>. A user typing `**not bold**` should see exactly that.
+        """
+        events = [
+            _event(
+                "human_resumed",
+                {
+                    "material_id": "ans",
+                    "answer_or_decision": {"answer_text": "**not bold**\nline 2"},
+                },
+            )
+        ]
+        msgs = view_helpers.build_conversation(events, {})
+        assert msgs[0]["body"] == "**not bold**\nline 2"
+        # Asterisks remain literal, newline becomes <br>, no markdown wrap.
+        assert "**not bold**" in msgs[0]["body_html"]
+        assert "<br>" in msgs[0]["body_html"]
+        assert "<strong>" not in msgs[0]["body_html"]
+
+    def test_user_bubble_escapes_html(self) -> None:
+        events = [
+            _event(
+                "human_resumed",
+                {
+                    "material_id": "ans",
+                    "answer_or_decision": {"answer_text": "<img src=x onerror=1>"},
+                },
+            )
+        ]
+        msgs = view_helpers.build_conversation(events, {})
+        assert "<img" not in msgs[0]["body_html"]
+        assert "&lt;img" in msgs[0]["body_html"]
+
+
+# ---------------------------------------------------------------------------
 # derive_active_models
 # ---------------------------------------------------------------------------
 

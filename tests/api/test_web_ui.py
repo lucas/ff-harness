@@ -417,3 +417,187 @@ def test_templates_handle_empty_state(make_test_app):
             "No spend recorded.",
         )
     ), body[:800]
+
+
+# ---------------------------------------------------------------------------
+# 14. Agent bubble markdown renders in the chat panel
+# ---------------------------------------------------------------------------
+
+
+def test_agent_bubble_renders_markdown_in_chat_panel(make_test_app):
+    """A Final envelope with markdown body must produce a chat bubble whose
+    rendered HTML contains <strong>...</strong>, not the literal `**...**`.
+    """
+    client, _ = make_test_app(
+        [Final(summary="**Done!** Site shipped.\n\n- one\n- two")]
+    )
+    sid = _create_session(client)
+    r = client.post(f"/sessions/{sid}/resume", json={})
+    assert r.status_code == 200
+    assert r.json()["status"] == "completed"
+
+    r = client.get(f"/sessions/{sid}/view")
+    body = r.text
+    chat_start = body.find('id="chat-log"')
+    chat_end = body.find('id="chat-input"', chat_start)
+    chat_section = body[chat_start:chat_end]
+
+    assert "<strong>Done!</strong>" in chat_section, chat_section[:1200]
+    assert "<li>one</li>" in chat_section
+    assert "<li>two</li>" in chat_section
+    # The literal markdown source must not also appear inside the bubble.
+    assert "**Done!**" not in chat_section
+
+
+# ---------------------------------------------------------------------------
+# 15. Input area does not restate the approval subject
+# ---------------------------------------------------------------------------
+
+
+def _slice_input_area(body: str) -> str:
+    """Return the substring of ``body`` from id="chat-input" to the
+    closing </section> of the chat panel — the input-area subtree.
+    """
+    start = body.find('id="chat-input"')
+    assert start != -1, "chat-input not found"
+    end = body.find("</section>", start)
+    return body[start:end]
+
+
+def test_input_area_does_not_restate_approval_subject(make_test_app):
+    """For a request_approval pending material the bubble above already
+    shows the subject. The input area must render only the action controls.
+    """
+    client, _ = make_test_app(_approval_then_final())
+    sid = _create_session(client)
+    r = client.post(f"/sessions/{sid}/resume", json={})
+    assert r.status_code == 200
+    assert r.json()["status"] == "awaiting_human"
+
+    r = client.get(f"/sessions/{sid}/view")
+    body = r.text
+    input_section = _slice_input_area(body)
+
+    # The subject "mockup" appears in the agent bubble; the input area must
+    # NOT repeat it.
+    assert "mockup" not in input_section, input_section[:2000]
+    # And the old restatement label must be gone too.
+    assert "Approval requested" not in input_section
+    # The collapsible "Details" accordion inside the input area is gone.
+    assert "Details</summary>" not in input_section
+    # Action buttons are still present.
+    assert "Approve" in input_section
+    assert "Deny" in input_section
+
+
+def test_input_area_does_not_restate_continuation_question(make_test_app):
+    """The continuation_approval bubble carries the long pause question.
+    The input area must render only Approve / Stop, not the question text.
+    """
+    cap_responses: list[ToolCall | Final | Escalate] = [
+        ToolCall(tool="list_files", args={"path": "."}) for _ in range(11)
+    ]
+    client, _ = make_test_app(cap_responses)
+    sid = _create_session(client)
+    r = client.post(f"/sessions/{sid}/resume", json={})
+    assert r.status_code == 200
+    assert r.json()["status"] == "awaiting_human"
+
+    r = client.get(f"/sessions/{sid}/view")
+    body = r.text
+    input_section = _slice_input_area(body)
+
+    # The orchestrator-generated continuation question typically contains
+    # "iterations" or "continue". Neither should appear in the input area.
+    assert "iterations without approval" not in input_section
+    assert "Continue?" not in input_section
+    # Buttons still present.
+    assert "Approve" in input_section
+    assert "Stop" in input_section
+
+
+def test_input_area_does_not_restate_freeform_question(make_test_app):
+    """For a freeform ask_user the chat bubble carries the question.
+    The input area must drop the `Question: ...` restatement.
+    """
+    question_text = "What is your business name?"
+    client, _ = make_test_app(
+        [
+            ToolCall(tool="ask_user", args={"question": question_text}),
+            Final(summary="done"),
+        ]
+    )
+    sid = _create_session(client)
+    r = client.post(f"/sessions/{sid}/resume", json={})
+    assert r.status_code == 200
+    assert r.json()["status"] == "awaiting_human"
+
+    r = client.get(f"/sessions/{sid}/view")
+    body = r.text
+    input_section = _slice_input_area(body)
+
+    # The question text must appear in the chat bubble above (somewhere in
+    # body) but NOT in the input area itself.
+    assert question_text in body
+    assert question_text not in input_section, input_section[:1500]
+    # Old "Question:" label restatement is gone too.
+    assert "Question:</strong>" not in input_section
+    assert "<strong>Question:" not in input_section
+
+
+def test_input_area_freeform_with_options_keeps_buttons_and_drops_question(make_test_app):
+    """Freeform ask_user WITH options: option buttons stay, but the question
+    restatement is gone."""
+    question_text = "Which aesthetic do you prefer?"
+    client, _ = make_test_app(
+        [
+            ToolCall(
+                tool="ask_user",
+                args={
+                    "question": question_text,
+                    "options": ["modern", "rustic"],
+                },
+            ),
+            Final(summary="done"),
+        ]
+    )
+    sid = _create_session(client)
+    r = client.post(f"/sessions/{sid}/resume", json={})
+    assert r.status_code == 200
+    assert r.json()["status"] == "awaiting_human"
+
+    r = client.get(f"/sessions/{sid}/view")
+    body = r.text
+    input_section = _slice_input_area(body)
+
+    assert question_text not in input_section
+    # Option buttons are still rendered.
+    assert 'data-option="modern"' in input_section
+    assert 'data-option="rustic"' in input_section
+    # Other… button is rendered alongside.
+    assert "other-btn" in input_section
+    assert 'data-action="reveal-other"' in input_section
+
+
+# ---------------------------------------------------------------------------
+# 16. "Other…" JS does not hide the options row
+# ---------------------------------------------------------------------------
+
+
+def test_other_button_js_does_not_hide_options(make_test_app):
+    """Regression guard: the JS handler for the Other… button must NOT
+    hide ``.options-row`` — the user should still see the canned options
+    after revealing the freeform textarea.
+    """
+    client, _ = make_test_app()
+    sid = _create_session(client)
+
+    r = client.get(f"/sessions/{sid}/view")
+    assert r.status_code == 200
+    body = r.text
+
+    # No JS line that hides options-row.
+    assert "optsRow.style.display = 'none'" not in body
+    assert "options-row" not in body or "style.display = 'none'" not in body.split("options-row", 1)[1]
+    # The reveal handler is still present so Other… still works.
+    assert 'data-action="reveal-other"' in body or "reveal-other" in body

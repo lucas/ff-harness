@@ -200,9 +200,55 @@
     .chat-bubble {
       padding: 8px 12px;
       border-radius: 12px;
-      white-space: pre-wrap;
       word-break: break-word;
       line-height: 1.4;
+    }
+    /* Markdown content lives directly inside .chat-bubble — keep margins
+       tight so a one-paragraph reply doesn't get oversized top/bottom space,
+       and make sure bullets render with markers. */
+    .chat-bubble p,
+    .chat-bubble ul,
+    .chat-bubble ol {
+      margin: 0;
+    }
+    .chat-bubble p + p,
+    .chat-bubble p + ul,
+    .chat-bubble p + ol,
+    .chat-bubble ul + p,
+    .chat-bubble ol + p {
+      margin-top: 6px;
+    }
+    .chat-bubble ul,
+    .chat-bubble ol {
+      padding-left: 20px;
+    }
+    .chat-bubble ul { list-style: disc; }
+    .chat-bubble ol { list-style: decimal; }
+    .chat-bubble li { margin: 2px 0; }
+    .chat-bubble code {
+      background: rgba(0, 0, 0, 0.06);
+      padding: 1px 4px;
+      border-radius: 3px;
+      font-size: 12px;
+    }
+    .chat-msg.user .chat-bubble code {
+      background: rgba(255, 255, 255, 0.18);
+    }
+    .chat-bubble pre {
+      margin: 6px 0 0;
+      padding: 8px;
+      border-radius: 4px;
+      font-size: 12px;
+    }
+    .chat-bubble pre code { background: transparent; padding: 0; }
+    .chat-bubble strong { font-weight: 600; }
+    .chat-bubble em { font-style: italic; }
+    .chat-bubble a { color: inherit; text-decoration: underline; }
+    .chat-bubble blockquote {
+      margin: 4px 0;
+      padding-left: 8px;
+      border-left: 3px solid rgba(0, 0, 0, 0.15);
+      color: var(--fg-muted);
     }
     .chat-msg.user .chat-bubble {
       background: var(--accent);
@@ -255,6 +301,10 @@
       border-left: 3px solid var(--warn);
       padding: 8px 12px;
       border-radius: 4px;
+    }
+    .chat-input .input-cue {
+      margin-bottom: 8px;
+      font-size: 12px;
     }
     .chat-input textarea {
       margin-bottom: 8px;

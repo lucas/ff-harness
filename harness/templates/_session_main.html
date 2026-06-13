@@ -10,7 +10,9 @@
       {% for msg in conversation %}
         <div class="chat-msg {{ msg.role }}">
           {% if msg.ts %}<div class="chat-time">{{ msg.ts }}</div>{% endif %}
-          <div class="chat-bubble">{{ msg.body }}</div>
+          {# body_html is pre-escaped + (for agent text) markdown-rendered;
+             see view_helpers._render_markdown / _escape_plain. Safe to | safe. #}
+          <div class="chat-bubble">{{ msg.body_html | safe }}</div>
           {% if msg.meta.tag %}
             <span class="tag {{ msg.meta.tag }}">{{ msg.meta.tag }}</span>
           {% endif %}
@@ -37,17 +39,12 @@
 
     {% if session.status == "awaiting_human" and active_pending %}
       {% set kind = active_pending.content.kind %}
+      {# The chat bubble immediately above the input area already shows the
+         question / subject / details — DON'T restate them here. We render
+         only the action controls plus a one-line muted context cue. #}
       {% if kind == "approval" %}
         <form class="answer-form" data-material-id="{{ active_pending.id }}" data-is-approval="1" data-is-continuation="0">
-          <div class="pending-q">
-            <strong>Approval requested:</strong> {{ active_pending.content.subject }}
-          </div>
-          {% if active_pending.content.details %}
-            <details style="margin-bottom:8px;">
-              <summary>Details</summary>
-              <pre>{{ active_pending.content.details | tojson(indent=2) }}</pre>
-            </details>
-          {% endif %}
+          <div class="input-cue muted">Respond to the request above:</div>
           <label for="notes-{{ active_pending.id }}" class="muted">Notes (optional):</label>
           <textarea id="notes-{{ active_pending.id }}" name="notes" placeholder="Optional notes for the agent..."></textarea>
           <div class="row-actions">
@@ -58,9 +55,7 @@
         </form>
       {% elif kind == "continuation_approval" %}
         <form class="answer-form" data-material-id="{{ active_pending.id }}" data-is-approval="1" data-is-continuation="1">
-          <div class="pending-q continuation">
-            {{ active_pending.content.question }}
-          </div>
+          <div class="input-cue muted">Approve another batch of iterations or stop:</div>
           <label for="notes-{{ active_pending.id }}" class="muted">Notes (optional):</label>
           <textarea id="notes-{{ active_pending.id }}" name="notes" placeholder="Optional notes for the agent..."></textarea>
           <div class="row-actions">
@@ -70,12 +65,10 @@
           <div class="form-result muted" style="margin-top:6px;"></div>
         </form>
       {% else %}
-        {# Freeform ask_user — with or without options #}
+        {# Freeform ask_user — with or without options. #}
         <form class="answer-form" data-material-id="{{ active_pending.id }}" data-is-approval="0">
-          <div class="pending-q">
-            <strong>Question:</strong> {{ active_pending.content.question }}
-          </div>
           {% if active_pending.content.options %}
+            <div class="input-cue muted">Choose an option or type your own:</div>
             <div class="row-actions options-row" style="flex-wrap: wrap; gap: 8px;">
               {% for opt in active_pending.content.options %}
                 <button type="submit" class="option-btn" data-option="{{ opt }}">{{ opt }}</button>
@@ -90,7 +83,7 @@
               </div>
             </div>
           {% else %}
-            <label for="answer-{{ active_pending.id }}" class="muted">Your answer:</label>
+            <div class="input-cue muted">Your answer:</div>
             <textarea id="answer-{{ active_pending.id }}" name="answer_text" required></textarea>
             <div class="row-actions">
               <button type="submit">Send</button>

@@ -50,6 +50,9 @@
     });
 
     // "Other…" button reveals the freeform textarea inside an options form.
+    // The option buttons STAY VISIBLE — the user might prefer a canned option
+    // after seeing the textarea. The Other… button itself is disabled after
+    // click to signal the textarea is now the active control.
     document.querySelectorAll('button.other-btn[data-action="reveal-other"]').forEach(function(btn) {
       btn.addEventListener('click', function() {
         const form = btn.closest('form.answer-form');
@@ -60,8 +63,7 @@
           const ta = otherDiv.querySelector('textarea');
           if (ta) ta.focus();
         }
-        const optsRow = form.querySelector('.options-row');
-        if (optsRow) optsRow.style.display = 'none';
+        btn.disabled = true;
       });
     });
 

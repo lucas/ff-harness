@@ -15,10 +15,49 @@ Public surface:
 
 from __future__ import annotations
 
+import html
 import json
 import os
 from datetime import datetime
 from typing import Any
+
+import mistune
+
+# Module-level renderer — built once, reused for every request. ``escape=True``
+# means any embedded HTML in the input (the LLM output is untrusted) is
+# escaped, so a `<script>` token in agent text cannot inject JS. ``hard_wrap``
+# turns single newlines into ``<br>`` which matches chat-style expectations.
+_md_renderer = mistune.create_markdown(
+    escape=True,
+    hard_wrap=True,
+    plugins=[],
+)
+
+
+def _render_markdown(text: str) -> str:
+    """Render ``text`` as CommonMark with HTML escaped. Always returns ``str``.
+
+    ``mistune.create_markdown(...)`` returns a callable whose static type is
+    ``str | list``; in practice with no renderer override it always returns
+    ``str``. We coerce defensively to keep the rest of the codebase typed.
+    """
+    out = _md_renderer(text)
+    if isinstance(out, str):
+        return out
+    # mistune in AST mode would return a list — we never configure that, but
+    # collapse defensively so the type checker is satisfied.
+    return "".join(str(x) for x in out)
+
+
+def _escape_plain(text: str) -> str:
+    """HTML-escape plain text and convert newlines to ``<br>``.
+
+    Used for agent bubbles whose body is an internal summary string
+    (e.g. ``"Wrote index.html (1234 bytes)"``) — those are already
+    formatted for the UI, so we treat them as literal text rather than
+    feeding them through the markdown renderer.
+    """
+    return html.escape(text).replace("\n", "<br>")
 
 
 # ---------------------------------------------------------------------------
@@ -235,9 +274,18 @@ def build_conversation(
 ) -> list[dict]:
     """Project events into chat-bubble messages, oldest first.
 
-    Each message is ``{role: 'user'|'agent', body: str, ts: 'HH:MM:SS',
-    meta: dict}``. ``meta`` carries an optional ``tag`` ("final", "escalate")
-    and an optional ``details_json`` blob for request_approval expansion.
+    Each message is ``{role: 'user'|'agent', body: str, body_html: str,
+    ts: 'HH:MM:SS', meta: dict}``. ``meta`` carries an optional ``tag``
+    ("final", "escalate") and an optional ``details_json`` blob for
+    request_approval expansion.
+
+    ``body`` is the raw text (handy for tests/debug); ``body_html`` is the
+    safe HTML the template emits. For agent bubbles carrying human-readable
+    text from the LLM (``final.summary``, ``escalate.reason``,
+    ``ask_user.question``, ``request_approval.subject``) we run the body
+    through the markdown renderer (``escape=True`` blocks XSS). For agent
+    bubbles representing tool-call summaries (e.g. ``"Wrote index.html
+    (1234 bytes)"``) and for all user bubbles we HTML-escape the plain text.
 
     Only ``worker_output`` (agent) and ``human_resumed`` (user) events
     contribute messages. ``materials_by_id`` is the lookup used to resolve
@@ -275,7 +323,13 @@ def build_conversation(
                 body = json.dumps(answer)
             else:
                 body = ""
-            out.append({"role": "user", "body": body, "ts": ts, "meta": meta})
+            out.append({
+                "role": "user",
+                "body": body,
+                "body_html": _escape_plain(body),
+                "ts": ts,
+                "meta": meta,
+            })
             continue
 
         if etype == "worker_output":
@@ -288,19 +342,40 @@ def build_conversation(
             if wt == "final":
                 body = envelope.get("summary", "") or ""
                 meta["tag"] = "final"
-                out.append({"role": "agent", "body": body, "ts": ts, "meta": meta})
+                out.append({
+                    "role": "agent",
+                    "body": body,
+                    "body_html": _render_markdown(body),
+                    "ts": ts,
+                    "meta": meta,
+                })
                 continue
             if wt == "escalate":
                 body = envelope.get("reason", "") or ""
                 meta["tag"] = "escalate"
-                out.append({"role": "agent", "body": body, "ts": ts, "meta": meta})
+                out.append({
+                    "role": "agent",
+                    "body": body,
+                    "body_html": _render_markdown(body),
+                    "ts": ts,
+                    "meta": meta,
+                })
                 continue
             if wt == "tool_call":
                 tool = envelope.get("tool", "")
                 args = _as_dict(envelope.get("args"))
-                body, extra = _tool_call_body(tool, args)
+                body, extra, render_md = _tool_call_body(tool, args)
                 meta.update(extra)
-                out.append({"role": "agent", "body": body, "ts": ts, "meta": meta})
+                body_html = (
+                    _render_markdown(body) if render_md else _escape_plain(body)
+                )
+                out.append({
+                    "role": "agent",
+                    "body": body,
+                    "body_html": body_html,
+                    "ts": ts,
+                    "meta": meta,
+                })
                 continue
             # Unknown envelope type: skip rather than render JSON.
             continue
@@ -314,15 +389,23 @@ def build_conversation(
     return out
 
 
-def _tool_call_body(tool: str, args: dict) -> tuple[str, dict]:
-    """Render a per-tool bubble body. Returns (body, meta_extras)."""
+def _tool_call_body(tool: str, args: dict) -> tuple[str, dict, bool]:
+    """Render a per-tool bubble body.
+
+    Returns ``(body, meta_extras, render_markdown)``. ``render_markdown=True``
+    means the body is human-readable text from the LLM (the agent's question
+    or approval subject) and should pass through the markdown renderer.
+    ``False`` means the body is an internal summary string we constructed
+    here (e.g. ``"Wrote index.html (1234 bytes)"``) — those are already
+    formatted, so they should only be HTML-escaped, not re-rendered.
+    """
     if tool == "ask_user":
         body = args.get("question") or ""
         meta: dict[str, Any] = {}
         opts = args.get("options")
         if isinstance(opts, list) and opts:
             meta["options"] = [str(o) for o in opts]
-        return body, meta
+        return body, meta, True
     if tool == "request_approval":
         subject = args.get("subject") or args.get("summary") or "?"
         body = f"Requesting approval: {subject}"
@@ -333,25 +416,25 @@ def _tool_call_body(tool: str, args: dict) -> tuple[str, dict]:
                 meta_out["details_json"] = json.dumps(details, indent=2, default=str)
             except (TypeError, ValueError):
                 meta_out["details_json"] = str(details)
-        return body, meta_out
+        return body, meta_out, True
     if tool == "render_mockup":
         layout = _as_dict(args.get("layout_spec"))
         sections_raw = layout.get("sections")
         sections = sections_raw if isinstance(sections_raw, list) else []
-        return f"Rendered mockup ({len(sections)} sections)", {}
+        return f"Rendered mockup ({len(sections)} sections)", {}, False
     if tool == "write_file":
         path = args.get("path", "?")
         content = args.get("content")
         size = len(content) if isinstance(content, str) else 0
-        return f"Wrote {path} ({size} bytes)", {}
+        return f"Wrote {path} ({size} bytes)", {}, False
     if tool == "read_file":
         path = args.get("path", "?")
-        return f"Read {path}", {}
+        return f"Read {path}", {}, False
     if tool == "list_files":
         path = args.get("path", ".")
-        return f"Listed files under {path}", {}
+        return f"Listed files under {path}", {}, False
     # Unknown tool: render the tool name + a short args excerpt.
-    return f"Call {tool} {_json_excerpt(args, 60)}", {}
+    return f"Call {tool} {_json_excerpt(args, 60)}", {}, False
 
 
 # ---------------------------------------------------------------------------

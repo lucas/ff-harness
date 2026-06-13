@@ -13,6 +13,7 @@ dependencies = [
   "fastapi",
   "uvicorn[standard]",
   "python-dotenv",
+  "mistune",
 ]
 
 [dependency-groups]
