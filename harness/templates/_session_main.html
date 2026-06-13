@@ -18,6 +18,12 @@
             {# body_html is pre-escaped + (for agent text) markdown-rendered;
                see view_helpers._render_markdown / _escape_plain. Safe to | safe. #}
             <div class="chat-bubble">{{ msg.body_html | safe }}</div>
+            {% if msg.attachment_html %}
+              {# Full-width attachment rendered AFTER the bubble — used by
+                 render_mockup for the 900px iframe preview so it isn't
+                 crushed by the bubble's 70%-viewport max-width. #}
+              <div class="chat-attachment">{{ msg.attachment_html | safe }}</div>
+            {% endif %}
             {% if msg.meta.tag %}
               <span class="tag {{ msg.meta.tag }}">{{ msg.meta.tag }}</span>
             {% endif %}

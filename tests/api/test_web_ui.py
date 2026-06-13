@@ -698,8 +698,10 @@ def test_session_view_renders_mockup_iframe(make_test_app):
     assert "<iframe" in chat_section
     assert 'sandbox=""' in chat_section
     assert "srcdoc=" in chat_section
-    # The mockup-card wrapper renders.
-    assert "mockup-card" in chat_section
+    # The caption renders inside the bubble; the iframe is hoisted into
+    # the full-width attachment div under the bubble.
+    assert "mockup-card-caption" in chat_section
+    assert "chat-attachment" in chat_section
     # No raw <pre> dump of the HTML — it lives inside the srcdoc attribute.
     assert "<pre>" not in chat_section
 

@@ -27,6 +27,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from harness.models.enums import (
     AlarmType,
@@ -48,6 +49,9 @@ from harness.services import (
 from harness.services.tools import ToolContext, ToolResult, dispatch
 from harness.services.worker import Worker
 
+if TYPE_CHECKING:
+    from harness.services.llm import ChatResponse
+
 
 # ---------------------------------------------------------------------------
 # Public surface
@@ -61,6 +65,14 @@ class OrchestratorConfig:
     The orchestrator never knows whether a worker is real (LLMWorker) or a
     MockWorker — both satisfy `Worker`. `sandbox_root_for` returns the per-
     session sandbox path; the orchestrator creates the directory if missing.
+
+    ``code_chat`` is an optional closure that issues a chat completion on
+    the code-LLM model (mirrors ``OpenRouterClient.chat`` minus the
+    ``model`` arg, which the closure binds). When provided, the
+    orchestrator threads it into every ``ToolContext`` so tools like
+    ``render_mockup`` can call out to the code worker for HTML generation.
+    Tests that drive the orchestrator with a MockWorker can omit it — the
+    tools degrade gracefully to their deterministic paths.
     """
 
     worker_for_stage: Callable[[str], Worker]
@@ -71,6 +83,9 @@ class OrchestratorConfig:
     sessions_dir: Path
     turn_cap: int = 10
     spend_cap_usd: float = 1.0
+    code_chat: Callable[..., "ChatResponse"] | None = None
+    code_model: str | None = None
+    code_model_is_fallback: bool = False
 
 
 @dataclass
@@ -514,6 +529,9 @@ def _run_loop(
             sandbox_path=sandbox_path,
             stage=stage,
             allow_list=list(config.allow_list),
+            code_chat=config.code_chat,
+            code_model=config.code_model,
+            code_model_is_fallback=config.code_model_is_fallback,
         )
         store.append_event(
             session_conn,

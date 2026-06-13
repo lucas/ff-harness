@@ -733,6 +733,12 @@ def build_conversation(
                 # ``body_html`` in the extra dict. When present, that wins
                 # over markdown / plain-text rendering.
                 override_html = extra.pop("body_html", None)
+                # ``attachment_html`` rides on the conversation entry as an
+                # optional full-width fragment rendered AFTER the bubble.
+                # Used by render_mockup so the iframe escapes the bubble's
+                # 70%-viewport max-width and renders at the design's 900px
+                # target width. The template emits it when present.
+                attachment_html = extra.pop("attachment_html", None)
                 meta.update(extra)
                 if isinstance(override_html, str):
                     body_html = override_html
@@ -742,13 +748,16 @@ def build_conversation(
                         if render_md
                         else _escape_plain(body)
                     )
-                out.append({
+                entry: dict[str, Any] = {
                     "role": "agent",
                     "body": body,
                     "body_html": body_html,
                     "ts": ts,
                     "meta": meta,
-                })
+                }
+                if isinstance(attachment_html, str) and attachment_html:
+                    entry["attachment_html"] = attachment_html
+                out.append(entry)
                 continue
             # Unknown envelope type: skip rather than render JSON.
             continue
@@ -821,9 +830,11 @@ def _tool_call_body(
         sections = sections_raw if isinstance(sections_raw, list) else []
         n_sections = len(sections)
         plain = f"Rendered mockup ({n_sections} sections)"
-        # If we can find the persisted mockup material, embed its themed
-        # HTML inside a sandboxed iframe preview. Otherwise fall back to
-        # the plain text summary (existing behavior).
+        # If we can find the persisted mockup material, render the bubble
+        # body as a small caption and emit the iframe as a full-width
+        # attachment under the bubble (see ``attachment_html`` handling in
+        # build_conversation). Otherwise fall back to the plain text
+        # summary (existing behavior).
         preview = (
             _latest_mockup_html(materials_by_id)
             if materials_by_id
@@ -834,21 +845,26 @@ def _tool_call_body(
         html_doc, themed = preview
         caption = f"Mockup preview ({n_sections} sections"
         caption += ", themed)" if themed else ")"
+        caption_html = (
+            f'<div class="mockup-card-caption">{html.escape(caption)}</div>'
+        )
         # srcdoc requires HTML-attribute escaping of the entire document.
         # html.escape(..., quote=True) handles ``"``, ``'``, ``<``, ``>``,
-        # ``&`` — enough for srcdoc placement. The inner document is
-        # already HTML-escaped at every user-data insertion point by
-        # `_build_mockup_html`.
+        # ``&`` — enough for srcdoc placement. The inner document is the
+        # mockup HTML (themed or deterministic-fallback); the chat bubble
+        # only carries the caption, and the iframe is hoisted into the
+        # attachment slot so it can render at 900px wide rather than being
+        # crushed by the bubble's 70%-viewport cap.
         srcdoc = html.escape(html_doc, quote=True)
-        card_html = (
-            '<div class="mockup-card">'
-            f'<div class="mockup-caption">{html.escape(caption)}</div>'
+        iframe_html = (
             '<iframe class="mockup-preview" sandbox="" '
             f'srcdoc="{srcdoc}" loading="lazy" '
-            'width="100%" height="420"></iframe>'
-            "</div>"
+            'width="900" height="640"></iframe>'
         )
-        return plain, {"body_html": card_html}, False
+        return plain, {
+            "body_html": caption_html,
+            "attachment_html": iframe_html,
+        }, False
     if tool == "write_file":
         path = args.get("path", "?")
         content = args.get("content")

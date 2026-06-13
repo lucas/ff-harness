@@ -700,3 +700,193 @@ def test_render_mockup_uses_brief_persisted_via_save_business_brief(
     html_doc = out["html"]
     assert "Jim" in html_doc
     assert "#0055aa" in html_doc
+
+
+# ---------------------------------------------------------------------------
+# render_mockup — LLM (code_chat) path + fallback behavior
+# ---------------------------------------------------------------------------
+
+
+def _ctx_with_code_chat(
+    tmp_session,
+    sandbox_dir: Path,
+    code_chat,
+    *,
+    code_model: str = "qwen/qwen3-coder:free",
+    code_model_is_fallback: bool = False,
+    stage: str = "mockup",
+):
+    """Build a ToolContext wired with a fake code_chat closure."""
+    _core, session_conn, _sid = tmp_session
+    return ToolContext(
+        session_conn=session_conn,
+        sandbox_path=sandbox_dir,
+        stage=stage,
+        allow_list=list(ALL_TOOLS),
+        code_chat=code_chat,
+        code_model=code_model,
+        code_model_is_fallback=code_model_is_fallback,
+    )
+
+
+class _FakeChatResponse:
+    """Minimal stand-in for harness.services.llm.ChatResponse."""
+
+    def __init__(
+        self,
+        text: str,
+        *,
+        tokens_in: int = 100,
+        tokens_out: int = 200,
+        cost_usd: float = 0.0,
+        model_used: str = "fake-model",
+    ) -> None:
+        self.text = text
+        self.tokens_in = tokens_in
+        self.tokens_out = tokens_out
+        self.cost_usd = cost_usd
+        self.model_used = model_used
+
+
+def test_render_mockup_uses_llm_when_code_chat_provided(tmp_session, sandbox_dir):
+    """A fake code_chat that returns valid HTML drives the mockup HTML; the
+    LLM call is recorded with status='ok'."""
+    _core, session_conn, _sid = tmp_session
+    fake_html = (
+        "<!doctype html><html lang='en'><head><title>x</title></head>"
+        "<body><h1>FROM_LLM_PATH</h1></body></html>"
+    )
+    captured: dict = {}
+
+    def code_chat(messages, *, response_format=None, temperature=0.2):
+        captured["messages"] = messages
+        captured["response_format"] = response_format
+        captured["temperature"] = temperature
+        return _FakeChatResponse(fake_html, tokens_in=12, tokens_out=34)
+
+    ctx = _ctx_with_code_chat(tmp_session, sandbox_dir, code_chat)
+
+    result = dispatch("render_mockup", {"layout_spec": _spec()}, ctx)
+    out = _ok(result)
+
+    # Mockup material's html is the LLM output verbatim.
+    assert out["html"] == fake_html
+    assert "FROM_LLM_PATH" in out["html"]
+    # llm_calls captured the call.
+    calls = store.load_llm_calls(session_conn)
+    assert len(calls) == 1
+    assert calls[0]["status"] == "ok"
+    assert calls[0]["model"] == "qwen/qwen3-coder:free"
+    assert calls[0]["tokens_in"] == 12
+    assert calls[0]["tokens_out"] == 34
+    # The closure was called with no JSON-mode response_format and the
+    # documented temperature.
+    assert captured["response_format"] is None
+    assert captured["temperature"] == 0.4
+
+
+def test_render_mockup_falls_back_when_llm_returns_unsafe_html(
+    tmp_session, sandbox_dir
+):
+    """LLM returns HTML containing a <script> tag — fall back to deterministic.
+    The llm_calls row records status='parse_error' (the API call succeeded
+    but its output was rejected)."""
+    _core, session_conn, _sid = tmp_session
+    unsafe = (
+        "<!doctype html><html><body>"
+        "<script>alert('xss')</script></body></html>"
+    )
+
+    def code_chat(messages, *, response_format=None, temperature=0.2):
+        return _FakeChatResponse(unsafe)
+
+    ctx = _ctx_with_code_chat(tmp_session, sandbox_dir, code_chat)
+
+    result = dispatch("render_mockup", {"layout_spec": _spec()}, ctx)
+    out = _ok(result)
+
+    # Material's html is NOT the unsafe LLM output — deterministic took over.
+    assert "alert(" not in out["html"]
+    assert "<script" not in out["html"]
+    # Deterministic output still produces a complete doc.
+    assert out["html"].lower().startswith("<!doctype")
+
+    calls = store.load_llm_calls(session_conn)
+    assert len(calls) == 1
+    assert calls[0]["status"] == "parse_error"
+
+
+def test_render_mockup_falls_back_when_llm_raises(tmp_session, sandbox_dir):
+    """A code_chat that raises LLMTransportError must not break the tool —
+    the deterministic renderer takes over and the llm_calls row carries
+    status='transport_error'."""
+    from harness.services.llm import LLMTransportError
+
+    _core, session_conn, _sid = tmp_session
+
+    def code_chat(messages, *, response_format=None, temperature=0.2):
+        raise LLMTransportError("simulated 500 from upstream")
+
+    ctx = _ctx_with_code_chat(tmp_session, sandbox_dir, code_chat)
+
+    result = dispatch("render_mockup", {"layout_spec": _spec()}, ctx)
+    out = _ok(result)
+
+    # Tool succeeded via the fallback path.
+    assert out["html"].lower().startswith("<!doctype")
+
+    calls = store.load_llm_calls(session_conn)
+    assert len(calls) == 1
+    assert calls[0]["status"] == "transport_error"
+    assert "simulated 500" in (calls[0]["error_message"] or "")
+
+
+def test_render_mockup_falls_back_when_no_code_chat(tmp_session, sandbox_dir):
+    """ctx.code_chat=None: deterministic path runs; no llm_calls row is
+    written."""
+    _core, session_conn, _sid = tmp_session
+    ctx = make_ctx(tmp_session, sandbox_dir, stage="mockup")
+
+    result = dispatch("render_mockup", {"layout_spec": _spec()}, ctx)
+    out = _ok(result)
+
+    assert out["html"].lower().startswith("<!doctype")
+    assert store.load_llm_calls(session_conn) == []
+
+
+def test_render_mockup_normalizes_color_names(tmp_session, sandbox_dir):
+    """Brief palette={primary:'blue', secondary:'white'} resolves to hex in
+    both paths: the deterministic fallback emits #1e40af in the rendered
+    HTML; the LLM prompt sees the same hex value."""
+    _core, session_conn, _sid = tmp_session
+    _persist_brief(
+        session_conn,
+        {
+            "name": "Color Test",
+            "palette": {"primary": "blue", "secondary": "white"},
+        },
+    )
+
+    # Deterministic path (no code_chat) — assert hex shows up in the HTML.
+    det_ctx = make_ctx(tmp_session, sandbox_dir, stage="mockup")
+    det_out = _ok(dispatch("render_mockup", {"layout_spec": _spec()}, det_ctx))
+    assert "#1e40af" in det_out["html"]
+    assert "#ffffff" in det_out["html"]
+
+    # LLM path — capture the prompt messages, assert hex shows up there.
+    captured: dict = {}
+
+    def code_chat(messages, *, response_format=None, temperature=0.2):
+        captured["messages"] = messages
+        # Return an obviously-LLM HTML so the fallback path is not taken.
+        return _FakeChatResponse(
+            "<!doctype html><html><body>llm</body></html>"
+        )
+
+    llm_ctx = _ctx_with_code_chat(tmp_session, sandbox_dir, code_chat)
+    _ok(dispatch("render_mockup", {"layout_spec": _spec()}, llm_ctx))
+
+    # The user prompt is the second message (system is first).
+    prompt_text = captured["messages"][-1]["content"]
+    assert "#1e40af" in prompt_text
+    assert "#ffffff" in prompt_text

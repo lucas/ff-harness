@@ -14,11 +14,22 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from harness.services import guardrails
 from harness.services.alarms import raise_tool_failed
 from harness.services.tools import brief, files, mockup, user
+
+if TYPE_CHECKING:
+    from harness.services.llm import ChatResponse
+
+
+# Type alias for the optional code-LLM callable threaded through ToolContext.
+# Mirrors ``OpenRouterClient.chat`` minus ``model`` (the closure binds it).
+# Kept type-erased (``Callable[..., Any]``) so tools don't couple to the
+# concrete LLM client class — the layer rule forbids `services.tools` from
+# importing the client itself.
+CodeChat = Callable[..., "ChatResponse"]
 
 
 @dataclass
@@ -29,12 +40,25 @@ class ToolContext:
     sandbox_path — absolute root under which file tools may operate
     stage        — current stage string (used in alarm rows + material rows)
     allow_list   — tool names the worker is permitted to invoke this turn
+    code_chat    — optional callable that issues a chat completion on the
+                   code model (mirrors ``OpenRouterClient.chat`` minus
+                   ``model``, which the closure binds). ``None`` means the
+                   tool must use its deterministic fallback. Tests construct
+                   ToolContext without this field and tools degrade
+                   gracefully.
+    code_model   — model id used by ``code_chat`` (for llm_calls logging).
+    code_model_is_fallback — True when ``code_model`` refers to the
+                   fallback rather than the primary code model. Rarely True;
+                   the closure usually targets the primary directly.
     """
 
     session_conn: sqlite3.Connection
     sandbox_path: Path
     stage: str
     allow_list: list[str]
+    code_chat: CodeChat | None = None
+    code_model: str | None = None
+    code_model_is_fallback: bool = False
 
 
 @dataclass

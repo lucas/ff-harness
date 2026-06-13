@@ -343,19 +343,31 @@
     }
     .chat-bubble .approval-prompt { margin: 8px 0 0; color: #555; }
 
-    /* Mockup-preview card rendered inside a chat bubble (render_mockup). */
-    .chat-bubble .mockup-card { display: block; }
-    .chat-bubble .mockup-caption {
+    /* Mockup caption inside the chat bubble — the iframe itself is
+       hoisted into ``.chat-attachment`` below so it can render full-width
+       (900px) rather than being crushed by the bubble's 70%-viewport cap. */
+    .chat-bubble .mockup-card-caption {
       font-size: 0.85em;
       color: #666;
-      margin-bottom: 6px;
     }
-    .chat-bubble .mockup-preview {
+
+    /* Full-width attachment slot rendered AFTER an agent bubble. Used by
+       render_mockup so the mockup preview iframe can render at the design's
+       900px target width instead of being constrained by the bubble. */
+    .chat-msg.agent .chat-attachment {
+      max-width: 900px;
+      width: 100%;
+      align-self: flex-start;
+      margin-top: 6px;
+    }
+    .chat-attachment iframe.mockup-preview {
       display: block;
       width: 100%;
+      height: 640px;
       border: 1px solid #ddd;
-      border-radius: 4px;
+      border-radius: 6px;
       background: white;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
     }
 
     /* Events table — keep the model-swap highlight visible */

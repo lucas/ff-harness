@@ -409,8 +409,10 @@ class TestBuildConversation:
 
     def test_render_mockup_bubble_includes_iframe_with_srcdoc(self) -> None:
         """When the persisted mockup material is available in materials_by_id,
-        the agent bubble's body_html embeds a sandboxed iframe whose srcdoc
-        carries the themed HTML document.
+        the conversation entry carries the sandboxed iframe in
+        ``attachment_html`` (not in the bubble body) so it can render
+        full-width under the bubble. The bubble itself shows only the
+        caption.
         """
         events = [
             _event(
@@ -441,22 +443,28 @@ class TestBuildConversation:
             }
         }
         msgs = view_helpers.build_conversation(events, materials_by_id)
+        # Bubble body holds the caption only — no iframe, no srcdoc.
         body_html = msgs[0]["body_html"]
-        assert "<iframe" in body_html
-        assert 'sandbox=""' in body_html
-        assert "srcdoc=" in body_html
+        assert "<iframe" not in body_html
+        assert "srcdoc=" not in body_html
         # The themed-suffix appears in the caption.
         assert "themed" in body_html
+        # Iframe + srcdoc are now in the attachment slot.
+        attachment_html = msgs[0]["attachment_html"]
+        assert "<iframe" in attachment_html
+        assert 'sandbox=""' in attachment_html
+        assert "srcdoc=" in attachment_html
         # The escaped HTML doc lives in the srcdoc.
-        assert "UNIQUE_BRAND_TEST" in body_html
+        assert "UNIQUE_BRAND_TEST" in attachment_html
         # The doctype angle brackets must be escaped inside the attribute.
-        assert "&lt;!doctype" in body_html
+        assert "&lt;!doctype" in attachment_html
         # The plain body still summarises the call.
         assert msgs[0]["body"] == "Rendered mockup (2 sections)"
 
     def test_render_mockup_bubble_iframe_escapes_srcdoc(self) -> None:
         """srcdoc placement requires HTML-attribute escaping. A document
         containing `"` characters must not break the attribute boundary.
+        Iframe lives in attachment_html now, not in body_html.
         """
         events = [
             _event(
@@ -485,18 +493,18 @@ class TestBuildConversation:
             }
         }
         msgs = view_helpers.build_conversation(events, materials_by_id)
-        body_html = msgs[0]["body_html"]
+        attachment_html = msgs[0]["attachment_html"]
         # Find the srcdoc attribute opener.
         srcdoc_opener = 'srcdoc="'
-        start = body_html.find(srcdoc_opener)
+        start = attachment_html.find(srcdoc_opener)
         assert start != -1
         # Walk forward from the opener and find the FIRST raw double-quote
         # — that's the attribute's closing delimiter. Everything between
         # must be HTML-attribute-escaped (no raw `"`).
         attr_value_start = start + len(srcdoc_opener)
-        closing_quote_at = body_html.find('"', attr_value_start)
+        closing_quote_at = attachment_html.find('"', attr_value_start)
         assert closing_quote_at != -1
-        attr_value = body_html[attr_value_start:closing_quote_at]
+        attr_value = attachment_html[attr_value_start:closing_quote_at]
         # The original document had `"` characters; they must be encoded.
         assert '"' not in attr_value
         assert "&quot;" in attr_value
@@ -505,7 +513,8 @@ class TestBuildConversation:
 
     def test_render_mockup_bubble_falls_back_to_plain_without_material(self) -> None:
         """Without a mockup material in materials_by_id, the bubble falls back
-        to the original plain-text summary (no iframe, no body_html override).
+        to the original plain-text summary (no iframe, no body_html override,
+        no attachment_html).
         """
         events = [
             _event(
@@ -525,6 +534,7 @@ class TestBuildConversation:
         body_html = msgs[0]["body_html"]
         assert "<iframe" not in body_html
         assert "Rendered mockup (2 sections)" in body_html
+        assert "attachment_html" not in msgs[0]
 
     def test_skips_non_chat_events(self) -> None:
         # Events like checkpoint_result / tool_call / tool_result must not

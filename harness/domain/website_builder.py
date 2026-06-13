@@ -16,7 +16,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from harness.models.enums import Stage
-from harness.services.llm import OpenRouterClient
+from harness.services.llm import ChatResponse, OpenRouterClient
 from harness.services.llm_worker import LLMWorker
 from harness.services.orchestrator import OrchestratorConfig
 from harness.services.worker import Worker
@@ -311,6 +311,11 @@ def make_orchestrator_config(
     `worker_for_stage_override` lets tests inject a closure that hands back
     a MockWorker for every stage without touching env vars or constructing
     an LLMWorker.
+
+    Also constructs a ``code_chat`` closure bound to the configured
+    ``MODEL_CODE`` (or ``_DEFAULT_MODEL_CODE``) so tools like
+    ``render_mockup`` can invoke the code LLM directly without owning the
+    OpenRouterClient (layer rule: tools don't import the LLM client class).
     """
     if worker_for_stage_override is not None:
         worker_for_stage = worker_for_stage_override
@@ -325,6 +330,23 @@ def make_orchestrator_config(
     def sandbox_root_for(sid: str) -> Path:
         return sandbox_path_for(sid, sandbox_root)
 
+    code_model = (
+        os.environ.get("MODEL_CODE") or _DEFAULT_MODEL_CODE
+    )
+
+    def _code_chat(
+        messages: list[dict],
+        *,
+        response_format: dict | None = None,
+        temperature: float = 0.2,
+    ) -> ChatResponse:
+        return llm_client.chat(
+            model=code_model,
+            messages=messages,
+            response_format=response_format,
+            temperature=temperature,
+        )
+
     return OrchestratorConfig(
         worker_for_stage=worker_for_stage,
         system_prompt=build_system_prompt(),
@@ -334,6 +356,9 @@ def make_orchestrator_config(
         sessions_dir=Path(sessions_dir),
         turn_cap=DEFAULT_TURN_CAP,
         spend_cap_usd=DEFAULT_SPEND_CAP_USD,
+        code_chat=_code_chat,
+        code_model=code_model,
+        code_model_is_fallback=False,
     )
 
 
